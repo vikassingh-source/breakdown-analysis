@@ -142,7 +142,7 @@ if st.sidebar.button("Clear All Uploaded Files", use_container_width=True):
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 💰 Cost Settings")
-cost_per_unit = st.sidebar.number_input("Cost per unit (₹)", min_value=0.0, value=50.0, step=1.0)
+cost_per_unit = st.sidebar.number_input("Cost per unit (₹)", min_value=0.0, value=50.0, step=1.0,help="Cost of producing one unit in ₹")
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 👤 Created by")
 st.sidebar.markdown("**Vikas Singh**")
@@ -925,7 +925,7 @@ if breakdown_files:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("YTD Breakdown Hours", f"{ytd_df['Total Hrs'].sum():,.1f}")
             c2.metric("YTD Production Loss", f"{ytd_df['Production Loss'].sum():,.0f} Kg")
-            c3.metric("YTD Cost of Loss", f"₹{ytd_df['Production Loss'].sum() * 21:,.0f}")
+            c3.metric("YTD Cost of Loss", f"₹{ytd_df['Production Loss'].sum() * cost_per_unit:,.0f}")
             c4.metric("YTD Breakdown Events", len(ytd_df))
             
             st.divider()
