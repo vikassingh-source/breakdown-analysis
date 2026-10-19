@@ -96,6 +96,9 @@ def read_breakdown_file(uploaded):
         data['M/C Name'] = data['M/C Name'].ffill()
     if 'Date' in data.columns:
         data['Date'] = pd.to_datetime(data['Date'], errors='coerce').ffill()
+        # NEW:  Calculate Fiscal Year (April to March)
+        data['FY_Year'] = data['Date'].dt.year + (data['Date'].dt.month >=4).astype(int)
+        data['FY_label'] = data['FY_Year'].apply(lambda y: f"{y-1}-{str(y)[-2:]}")
     data['Total Hrs'] = pd.to_numeric(data['Total Hrs'], errors='coerce').fillna(0)
     data['Production Loss'] = pd.to_numeric(data['Production Loss'], errors='coerce').fillna(0)
     data = data.dropna(subset=['M/C Name', 'Reason of Breakdown'])
@@ -232,10 +235,10 @@ if breakdown_files:
     df['Month_Num'] = df['Period_Key'].str[5:7]
     df['Month_Name'] = df['Month_Num'].map(MONTH_NAMES)
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📊 Overview", "📅 Month Comparison", "📈 Year Comparison",
         "🏆 Yearly Analysis", "🏭 Capacity Analysis",
-        "🔧 Machine-wise", "🔁 Causes"
+        "🔧 Machine-wise", "🔁 Causes","📅 YTD (Fiscal Year)"
     ])
 
     # ---------- TAB 1: OVERVIEW ----------
@@ -578,7 +581,75 @@ if breakdown_files:
                 index='M/C Name', columns='Reason of Breakdown',
                 values='Total Hrs', aggfunc='count', fill_value=0)
             st.dataframe(pivot, use_container_width=True)
-# ============================================================
+            # ---------- TAB 8: YTD (FISCAL YEAR) ----------
+    with tab8:
+       st.subheader("📆 YTD Analysis (Fiscal Year: April to March)")
+    
+    # Select Fiscal Year
+    df['FY_Label'] = df['Date'].dt.year + (df['Date'].dt.month >=4).astype(int)
+    df['FY_Label'] = df['FY_Label'].apply(lambda y: f"{int(y)-1}-{str(int(y))[-2:]}" if pd.notna(y) else "Unknown")
+    fy_options = sorted(df['FY_Label'].dropna().unique())
+    if len(fy_options) == 0:
+        st.warning("No Fiscal Year data available. Make sure your Excel has a 'Date' column.")
+    else:
+        sel_fy = st.selectbox("Select Financial Year", fy_options, index=len(fy_options)-1)
+        
+        # Filter data for selected FY
+        ytd_df = df[df['FY_Label'] == sel_fy].copy()
+        
+        # FY Month order (Apr to Mar)
+        fy_months = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar']
+        ytd_df['Month_Name'] = pd.Categorical(ytd_df['Month_Name'], categories=fy_months, ordered=True)
+        
+        # Group by month
+        fy_trend = ytd_df.groupby('Month_Name', observed=False).agg(
+            Hours=('Total Hrs', 'sum'),
+            Loss=('Production Loss', 'sum'),
+            Events=('Total Hrs', 'count')
+        ).reset_index()
+        
+        # Drop months with zero events (future months)
+        fy_trend = fy_trend[fy_trend['Events'] > 0]
+        
+        # Cumulative columns
+        fy_trend['Cumulative_Hours'] = fy_trend['Hours'].cumsum()
+        fy_trend['Cumulative_Loss'] = fy_trend['Loss'].cumsum()
+        
+        # KPI Cards for YTD
+        st.markdown(f"### YTD Totals — FY {sel_fy}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("YTD Breakdown Hours", f"{ytd_df['Total Hrs'].sum():,.1f}")
+        c2.metric("YTD Production Loss", f"{ytd_df['Production Loss'].sum():,.0f} Kg")
+        c3_val = ytd_df['Production Loss'].sum() * 21.0 # Using 21as default fallback
+        c3.metric("YTD Cost of Loss", f"₹{c3_val:,.0f}")
+        c4.metric("YTD Breakdown Events", len(ytd_df))
+        
+        st.divider()
+        
+        # Chart: Monthly + Cumulative
+        st.subheader("📊 Monthly & Cumulative Trend (YTD)")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=fy_trend['Month_Name'], y=fy_trend['Hours'],
+            name='Monthly Hours', marker_color='#1F4E78',
+            text=fy_trend['Hours'].round(1), textposition='outside'
+        ))
+        fig.add_trace(go.Scatter(
+            x=fy_trend['Month_Name'], y=fy_trend['Cumulative_Hours'],
+            name='Cumulative Hours', mode='lines+markers',
+            line=dict(color='#E74C3C', width=3), yaxis='y2'
+        ))
+        fig.update_layout(
+            yaxis=dict(title='Monthly Hours'),
+            yaxis2=dict(title='Cumulative Hours', overlaying='y', side='right'),
+            hovermode='x unified', height=450
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Table: Month-wise YTD
+        st.subheader("📋 Month-wise YTD Breakdown")
+        st.dataframe(fy_trend[['Month_Name', 'Hours', 'Loss', 'Events', 'Cumulative_Hours', 'Cumulative_Loss']], use_container_width=True, hide_index=True)
+    # ============================================================
     # EXCEL EXPORT
     # ============================================================
     st.divider()
@@ -1307,8 +1378,8 @@ if breakdown_files:
             except Exception as e:
                 st.error(f"❌ PowerPoint error: {e}")
 
-else:
-    st.info("👆 Upload at least one **Breakdown Excel** file to begin.")
+    else:
+        st.info("👆 Upload at least one **Breakdown Excel** file to begin.")
     st.markdown("""
     ### 📁 Files you can upload
 
