@@ -1,1091 +1,1251 @@
-import streamlit as st
+import io
+import re
+import calendar
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import io
-import re
+import streamlit as st
 from openpyxl.styles import Font, PatternFill, Alignment
+from datetime import datetime
 
-st.set_page_config(page_title="Breakdown Analysis", layout="wide")
+try:
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    from pptx.enum.shapes import MSO_SHAPE
+    PPTX_OK = True
+except ImportError:
+    PPTX_OK = False
 
-st.title("🔧 Breakdown & Production Loss Analysis Dashboard")
+# =====================================================================
+# 1. PAGE SETUP
+# =====================================================================
+st.set_page_config(page_title="Breakdown & Production Loss Analysis Dashboard", layout="wide")
+
 st.markdown(
     """
-    <div style="background-color:#1F4E78; padding:10px 15px; border-radius:8px; color:white; margin-bottom:15px;">
-        <b>👤 Team Leader:</b> J.C Roy(Mechanical) &nbsp;|&nbsp;
-        <b>👤 Team Member:</b> Ajit Basha(Electrical) &nbsp;|&nbsp;
-        <b>👤 Team Member:</b> Vikas Singh(Instrumentation) &nbsp;|&nbsp;
-        <b>👤 Team Member:</b> Bhaskar Ghormare(Dyeing) &nbsp;|&nbsp;
-        <b>📅 Version:</b> 2.0
+    <div style="background-color:#1F3A5F;padding:16px 20px;border-radius:8px;color:white;margin-bottom:12px;">
+        <h2 style="margin:0;color:white;">Breakdown &amp; Production Loss Analysis Dashboard</h2>
+        <p style="margin:4px 0 0 0;color:white;">
+            Created by: Vikas Singh | Department: Instrumentation | Version: 2.0
+        </p>
+        <p style="margin:4px 0 0 0;color:white;font-size:14px;">
+            <b>CFT Members:</b> TL J.C Roy (Mechanical), Ajit Basha (Electrical),
+            Vikas Singh (Instrumentation), Bhaskar Ghormare (Dyeing)
+        </p>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# ============================================================
-# HELPERS
-# ============================================================
-MONTH_MAP = {
-    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
-    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'june': 6,
-    'july': 7, 'august': 8, 'september': 9, 'october': 10,
-    'november': 11, 'december': 12
-}
 
-MONTH_NAMES = {
-    '01': 'Jan', '02': 'Feb', '03': 'Mar', '04': 'Apr',
-    '05': 'May', '06': 'Jun', '07': 'Jul', '08': 'Aug',
-    '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec'
-}
+# ---------- small UI helpers (work across Streamlit versions) ----------
+def show_chart(fig):
+    try:
+        st.plotly_chart(fig, width="stretch")
+    except TypeError:
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def show_df(d, **kw):
+    try:
+        st.dataframe(d, width="stretch", **kw)
+    except TypeError:
+        st.dataframe(d, use_container_width=True, **kw)
+
+
+# =====================================================================
+# 3. DATA PROCESSING FUNCTIONS
+# =====================================================================
+MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_abbr) if m}
+FULL_MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
+
+
+def label_from_period(period):
+    y, m = period.split("-")
+    return f"{calendar.month_abbr[int(m)]}-{y[-2:]}"
 
 
 def parse_period(filename):
-    name = filename.lower().replace('.xlsx', '').replace('.xls', '')
-    pattern = r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)[\s_\-]*(\d{2,4})'
-    m = re.search(pattern, name)
+    """Return ('YYYY-MM', 'Mon-YY') from a filename, or (None, stem)."""
+    name = str(filename)
+    m = re.search(r"(20\d{2})[-_ .]?(0[1-9]|1[0-2])(?!\d)", name)
     if m:
-        month = MONTH_MAP.get(m.group(1)[:3], 0)
-        year = int(m.group(2))
-        if year < 100:
-            year += 2000
-        label = MONTH_NAMES.get(f"{month:02d}", m.group(1).title()) + "-" + str(year)[-2:]
-        return f"{year}-{month:02d}", label
-    m = re.search(r'(\d{4})[\s_\-]?(\d{2})', name)
+        period = f"{m.group(1)}-{m.group(2)}"
+        return period, label_from_period(period)
+    m = re.search(r"([A-Za-z]{3,9})[-_ .]*'?((?:20)?\d{2})(?!\d)", name)
     if m:
-        year, month = int(m.group(1)), int(m.group(2))
-        label = MONTH_NAMES.get(f"{month:02d}", str(month)) + "-" + str(year)
-        return f"{year}-{month:02d}", label
-    return name, name
+        key = m.group(1).lower()
+        mon = MONTHS.get(key[:3]) if (key[:3] in MONTHS) else None
+        if key in FULL_MONTHS:
+            mon = FULL_MONTHS[key]
+        if mon:
+            yr = m.group(2)
+            yr = int(yr) + 2000 if len(yr) == 2 else int(yr)
+            period = f"{yr}-{mon:02d}"
+            return period, label_from_period(period)
+    return None, re.sub(r"\.[^.]+$", "", name)
 
 
 def map_type(value):
-    v = str(value).lower().strip()
-    if 'inst' in v:
-        return 'Instrumentation'
-    if 'elec' in v or 'electric' in v:
-        return 'Electrical'
-    if 'mech' in v:
-        return 'Mechanical'
-    return str(value).title()
+    v = str(value).strip().lower()
+    if v in ("nan", "", "none"):
+        return "Other"
+    if "inst" in v:
+        return "Instrumentation"
+    if "elec" in v:
+        return "Electrical"
+    if "mech" in v:
+        return "Mechanical"
+    return "Other"
+
+
+def norm_name(x):
+    return re.sub(r"\s+", " ", str(x)).strip().upper()
+
+
+def find_col(cols, keys, exclude=()):
+    for k in keys:
+        for c in cols:
+            lc = c.lower()
+            if k in lc and not any(e in lc for e in exclude):
+                return c
+    return None
 
 
 def read_breakdown_file(uploaded):
-    file_ext = uploaded.name.split('.')[-1].lower()
-    engine = 'xlrd' if file_ext == 'xls' else 'openpyxl'
-    sheets = pd.read_excel(uploaded, sheet_name=None, engine=engine)
-
+    """Read every sheet of a breakdown workbook and return a clean DataFrame."""
+    period, _ = parse_period(uploaded.name)
     frames = []
-    for sheet_name, df in sheets.items():
-        df.columns = [str(c).replace('.', '').strip() for c in df.columns]
-        if 'Worked By' in df.columns:
-            df["Breakdown Type"] = df["Worked By"].apply(map_type)
+    xl = pd.ExcelFile(uploaded)
+    for sheet in xl.sheet_names:
+        raw = xl.parse(sheet)
+        if raw.empty:
+            continue
+        raw.columns = [re.sub(r"[.\s]+", "", str(c)) for c in raw.columns]
+        cols = list(raw.columns)
+        c_mc = find_col(cols, ["m/c", "mcname", "machine"])
+        c_date = find_col(cols, ["date"])
+        c_hrs = find_col(cols, ["totalhr", "totalhour", "hrs", "hours"])
+        c_loss = find_col(cols, ["productionloss", "prodloss", "loss"])
+        c_work = find_col(cols, ["workedby", "workby", "worked"])
+        c_shift = find_col(cols, ["shift"])
+        c_cause = find_col(cols, ["cause", "reason", "problem", "remark"])
+        if c_mc is None or c_hrs is None:
+            continue
+
+        d = pd.DataFrame()
+        mc = raw[c_mc].replace(r"^\s*$", pd.NA, regex=True).ffill()
+        d["Machine"] = mc.astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+        if c_date:
+            d["Date"] = pd.to_datetime(raw[c_date].replace(r"^\s*$", pd.NA, regex=True).ffill(),
+                                       errors="coerce", dayfirst=True)
         else:
-            df["Breakdown Type"] = map_type(sheet_name)
-        frames.append(df)
+            d["Date"] = pd.NaT
+        d["Hours"] = pd.to_numeric(raw[c_hrs], errors="coerce")
+        d["Loss"] = pd.to_numeric(raw[c_loss], errors="coerce").fillna(0) if c_loss else 0.0
+        d["Type"] = raw[c_work].apply(map_type) if c_work else "Other"
+        d["Shift"] = raw[c_shift].astype(str).str.strip().replace({"nan": "Unknown", "": "Unknown"}) if c_shift else "Unknown"
+        d["Cause"] = raw[c_cause].astype(str).str.strip().replace({"nan": "Unknown", "": "Unknown"}) if c_cause else "Unknown"
+        d["Sheet"] = sheet
+        d["Source"] = uploaded.name
 
-    data = pd.concat(frames, ignore_index=True)
-    if 'M/C Name' in data.columns:
-        data['M/C Name'] = data['M/C Name'].ffill()
-    if 'Date' in data.columns:
-        data['Date'] = pd.to_datetime(data['Date'], errors='coerce').ffill()
-        # NEW: Calculate Fiscal Year (April to March)
-        data['FY_Year'] = data['Date'].dt.year + (data['Date'].dt.month >= 4).astype(int)
-        data['FY_Label'] = data['FY_Year'].apply(lambda y: f"{int(y)-1}-{str(int(y))[-2:]}" if pd.notna(y) else "Unknown")
+        d = d[d["Machine"].notna() & (d["Machine"].str.lower() != "nan")]
+        d = d[~d["Machine"].str.lower().str.contains("total", na=False)]
+        d = d[d["Hours"].notna()]
+        if period:
+            d["Period"] = period
+        else:
+            d["Period"] = d["Date"].dt.strftime("%Y-%m")
+        d = d[d["Period"].notna()]
+        frames.append(d)
+
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    out["Year"] = out["Period"].str[:4].astype(int)
+    out["Month"] = out["Period"].str[5:7].astype(int)
+    out["Period_Label"] = out["Period"].apply(label_from_period)
+    out["FY_Year"] = out.apply(lambda r: r["Year"] + 1 if r["Month"] >= 4 else r["Year"], axis=1)
+    out["FY_Label"] = out["FY_Year"].apply(lambda y: f"{y - 1}-{str(y)[-2:]}")
+    return out
+
+
+def read_master(uploaded):
+    xl = pd.ExcelFile(uploaded)
+    d = xl.parse(xl.sheet_names[0])
+    cols = [str(c) for c in d.columns]
+    d.columns = cols
+    col = find_col(cols, ["machine", "m/c", "name"]) or cols[0]
+    names = d[col].dropna().astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+    names = names[names != ""]
+    return list(dict.fromkeys(names))
+
+
+def read_calendars(files):
+    """Return {'YYYY-MM': available hours}."""
+    out = {}
+    for f in files:
+        xl = pd.ExcelFile(f)
+        for sheet in xl.sheet_names:
+            d = xl.parse(sheet)
+            cols = [str(c) for c in d.columns]
+            d.columns = cols
+            c_date = find_col(cols, ["date"])
+            c_hr = find_col(cols, ["hour", "avail"])
+            if not c_date or not c_hr:
+                continue
+            tmp = pd.DataFrame({
+                "d": pd.to_datetime(d[c_date], errors="coerce", dayfirst=True),
+                "h": pd.to_numeric(d[c_hr], errors="coerce"),
+            }).dropna()
+            if tmp.empty:
+                continue
+            g = tmp.groupby(tmp["d"].dt.strftime("%Y-%m"))["h"].sum()
+            for k, v in g.items():
+                out[k] = out.get(k, 0) + float(v)
+    return out
+
+
+def pivot(d, index, columns, order=None, values="Hours"):
+    p = d.pivot_table(index=index, columns=columns, values=values, aggfunc="sum", fill_value=0)
+    if order is not None:
+        p = p.reindex(columns=[c for c in order if c in p.columns])
+    p["Total"] = p.sum(axis=1)
+    return p.sort_values("Total", ascending=False).round(2)
+
+
+def pct_change(cur, prev):
+    if prev in (0, None) or pd.isna(prev):
+        return None
+    return (cur - prev) / prev * 100
+
+
+# =====================================================================
+# 5. EXCEL EXPORT
+# =====================================================================
+def build_excel_report(df):
+    out = io.BytesIO()
+    order = df.drop_duplicates("Period").sort_values("Period")["Period_Label"].tolist()
+
+    kpi = pd.DataFrame({
+        "Metric": ["Total Breakdown Hours", "Total Production Loss", "Total Events",
+                   "Avg Hours / Event", "Machines Affected", "Periods Covered"],
+        "Value": [round(df["Hours"].sum(), 2), round(df["Loss"].sum(), 2), len(df),
+                  round(df["Hours"].mean(), 2), df["Machine"].nunique(), df["Period"].nunique()],
+    })
+
+    by_period = (df.groupby(["Period", "Period_Label"])
+                 .agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"), Events=("Hours", "count"))
+                 .reset_index().sort_values("Period"))
+    monthly = by_period.copy()
+    monthly["Hours MoM %"] = monthly["Hours"].pct_change() * 100
+    monthly["Loss MoM %"] = monthly["Loss"].pct_change() * 100
+    monthly = monthly.round(2)
+
+    yearly = df.groupby("Year").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"),
+                                    Events=("Hours", "count")).reset_index()
+    yearly["Hours YoY %"] = yearly["Hours"].pct_change() * 100
+    yearly = yearly.round(2)
+
+    by_machine = (df.groupby("Machine").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"),
+                                            Events=("Hours", "count"))
+                  .reset_index().sort_values("Hours", ascending=False))
+    by_type = df.groupby("Type").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"),
+                                     Events=("Hours", "count")).reset_index()
+    by_cause = (df.groupby("Cause").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"),
+                                        Events=("Hours", "count"))
+                .reset_index().sort_values("Hours", ascending=False))
+
+    m_p = pivot(df, "Machine", "Period_Label", order).reset_index()
+    t_y = pivot(df, "Type", "Year").reset_index()
+    c_m = pivot(df, "Cause", "Machine").reset_index()
+    raw = df.copy()
+    if "Date" in raw.columns:
+        raw["Date"] = raw["Date"].dt.strftime("%Y-%m-%d")
+
+    sheets = {
+        "KPI Summary": kpi,
+        "Monthly Comparison": monthly,
+        "Yearly Comparison": yearly,
+        "By Period": by_period.round(2),
+        "By Machine": by_machine.round(2),
+        "By Type": by_type.round(2),
+        "By Cause": by_cause.round(2),
+        "Machine x Period": m_p,
+        "Type x Year": t_y,
+        "Cause x Machine": c_m,
+        "Raw Data": raw,
+    }
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        for name, frame in sheets.items():
+            frame.to_excel(writer, sheet_name=name[:31], index=False)
+        hfill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        hfont = Font(bold=True, color="FFFFFF")
+        for ws in writer.book.worksheets:
+            for cell in ws[1]:
+                cell.fill = hfill
+                cell.font = hfont
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            for col in ws.columns:
+                width = max(len(str(c.value)) if c.value is not None else 0 for c in col[:200])
+                ws.column_dimensions[col[0].column_letter].width = min(max(width + 2, 10), 45)
+            ws.freeze_panes = "A2"
+    return out.getvalue()
+
+
+# =====================================================================
+# 6. POWERPOINT EXPORT (native, editable charts & tables - PowerPoint / WPS)
+# =====================================================================
+PPT_PALETTE = ["1F4E78", "E74C3C", "2ECC71", "F39C12", "8E44AD", "16A085", "D35400", "2980B9", "7F8C8D", "C0392B"]
+PPT_SET2 = ["66C2A5", "FC8D62", "8DA0CB", "E78AC3", "A6D854", "FFD92F", "E5C494", "B3B3B3"]
+PPT_PASTEL = ["FBB4AE", "B3CDE3", "CCEBC5", "DECBE4", "FED9A6", "FFFFCC", "E5D8BD", "FDDAEC"]
+
+
+def _rgb(h):
+    return RGBColor.from_string(h)
+
+
+def _short(x, n=32):
+    x = str(x)
+    return x if len(x) <= n else x[: n - 1] + "…"
+
+
+def _grad(vals, high_bad=True):
+    """Green-Yellow-Red colours (hex) for a list of values."""
+    vals = [0 if pd.isna(v) else float(v) for v in vals]
+    lo, hi = (min(vals), max(vals)) if vals else (0, 1)
+    out = []
+    for v in vals:
+        f = 0.5 if hi == lo else (v - lo) / (hi - lo)
+        if not high_bad:
+            f = 1 - f
+        r = 255 if f > 0.5 else int(510 * f)
+        g = 200 if f < 0.5 else int(200 * (1 - (f - 0.5) * 2))
+        out.append(f"{r:02X}{g:02X}40")
+    return out
+
+
+def _ppt_text(slide, text, l, t, w, h, size=14, bold=False, color="000000", align=None):
+    tb = slide.shapes.add_textbox(Inches(l), Inches(t), Inches(w), Inches(h))
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.text = str(text)
+    for p in tf.paragraphs:
+        p.font.size = Pt(size)
+        p.font.bold = bold
+        p.font.color.rgb = _rgb(color)
+        if align is not None:
+            p.alignment = align
+    return tb
+
+
+def _ppt_slide(prs, title):
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    bar = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, Inches(0.8))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = _rgb("1F4E78")
+    bar.line.fill.background()
+    tf = bar.text_frame
+    tf.text = title
+    tf.margin_left = Inches(0.4)
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    p = tf.paragraphs[0]
+    p.font.size = Pt(24)
+    p.font.bold = True
+    p.font.color.rgb = _rgb("FFFFFF")
+    p.alignment = PP_ALIGN.LEFT
+    _ppt_text(s, "Created by: Vikas Singh | Department: Instrumentation | Version: 2.0",
+              0.4, 7.1, 9, 0.3, 10, False, "7F7F7F")
+    return s
+
+
+def _ppt_kpis(slide, items, top=1.05, per_row=4, h=1.25):
+    gap, total = 0.2, 12.5
+    w = (total - gap * (per_row - 1)) / per_row
+    for i, (label, value) in enumerate(items):
+        r, c = divmod(i, per_row)
+        l = 0.4 + c * (w + gap)
+        t = top + r * (h + 0.15)
+        box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(l), Inches(t), Inches(w), Inches(h))
+        box.fill.solid()
+        box.fill.fore_color.rgb = _rgb("EAF1F8")
+        box.line.color.rgb = _rgb("1F4E78")
+        tf = box.text_frame
+        tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        tf.text = str(label)
+        p0 = tf.paragraphs[0]
+        p0.font.size = Pt(12)
+        p0.font.color.rgb = _rgb("595959")
+        p0.alignment = PP_ALIGN.CENTER
+        p1 = tf.add_paragraph()
+        p1.text = str(value)
+        p1.font.size = Pt(22)
+        p1.font.bold = True
+        p1.font.color.rgb = _rgb("1F4E78")
+        p1.alignment = PP_ALIGN.CENTER
+
+
+def _ppt_chart(slide, ctype, cats, series, title, l, t, w, h, colors=None,
+               point_colors=None, labels=False, reverse=False, numfmt="#,##0.0"):
+    C = XL_CHART_TYPE
+    cd = CategoryChartData()
+    cd.categories = [_short(c) for c in cats]
+    for name, vals in series.items():
+        cd.add_series(str(name), [None if pd.isna(v) else float(v) for v in vals])
+    gf = slide.shapes.add_chart(ctype, Inches(l), Inches(t), Inches(w), Inches(h), cd)
+    ch = gf.chart
+    ch.has_title = True
+    ch.chart_title.text_frame.text = title
+    tp = ch.chart_title.text_frame.paragraphs[0]
+    tp.font.size = Pt(14)
+    tp.font.bold = True
+    ch.has_legend = len(series) > 1 or ctype == C.PIE
+    if ch.has_legend:
+        ch.legend.position = XL_LEGEND_POSITION.BOTTOM
+        ch.legend.include_in_layout = False
+        ch.legend.font.size = Pt(10)
+    colors = colors or PPT_PALETTE
+    plot = ch.plots[0]
+
+    if ctype == C.PIE:
+        plot.has_data_labels = True
+        dl = plot.data_labels
+        dl.show_percentage = True
+        dl.show_value = False
+        dl.number_format = "0.0%"
+        dl.number_format_is_linked = False
+        dl.font.size = Pt(11)
+        for i in range(len(list(cats))):
+            pt = plot.series[0].points[i]
+            pt.format.fill.solid()
+            pt.format.fill.fore_color.rgb = _rgb(colors[i % len(colors)])
+        return ch
+
+    is_line = ctype == C.LINE_MARKERS
+    for i, ser in enumerate(plot.series):
+        col = _rgb(colors[i % len(colors)])
+        if is_line:
+            ser.format.line.color.rgb = col
+            ser.format.line.width = Pt(3)
+            ser.smooth = False
+        else:
+            ser.format.fill.solid()
+            ser.format.fill.fore_color.rgb = col
+    if point_colors and not is_line:
+        for i, hx in enumerate(point_colors):
+            pt = plot.series[0].points[i]
+            pt.format.fill.solid()
+            pt.format.fill.fore_color.rgb = _rgb(hx)
+    if not is_line:
+        try:
+            plot.gap_width = 60
+        except Exception:  # noqa: BLE001
+            pass
+    if labels:
+        plot.has_data_labels = True
+        plot.data_labels.font.size = Pt(8)
+        plot.data_labels.number_format = numfmt
+        plot.data_labels.number_format_is_linked = False
+    ch.category_axis.tick_labels.font.size = Pt(9)
+    ch.value_axis.tick_labels.font.size = Pt(9)
+    ch.value_axis.tick_labels.number_format = "#,##0"
+    ch.value_axis.tick_labels.number_format_is_linked = False
+    if reverse:
+        ch.category_axis.reverse_order = True
+    return ch
+
+
+def _ppt_pivot_chart(slide, ctype, p, title, l, t, w, h, **kw):
+    """p: index = categories, columns = series."""
+    p = p.drop(columns="Total", errors="ignore")
+    return _ppt_chart(slide, ctype, [str(i) for i in p.index],
+                      {str(c): p[c].tolist() for c in p.columns}, title, l, t, w, h, **kw)
+
+
+def _fmt_cell(v):
+    if pd.isna(v):
+        return "-"
+    if pd.api.types.is_integer(v):
+        return f"{int(v):,}"
+    if pd.api.types.is_float(v):
+        return f"{v:,.2f}"
+    return _short(v, 45)
+
+
+def _ppt_table(slide, d, l, t, w, h, fs=10):
+    rows, cols = d.shape
+    shape = slide.shapes.add_table(rows + 1, cols, Inches(l), Inches(t), Inches(w), Inches(h))
+    tbl = shape.table
+    first_w = w * 0.25 if cols > 3 else w / cols
+    other_w = (w - first_w) / (cols - 1) if cols > 1 else w
+    tbl.columns[0].width = Inches(first_w)
+    for j in range(1, cols):
+        tbl.columns[j].width = Inches(other_w)
+    row_h = Inches(h / (rows + 1))
+    for i in range(rows + 1):
+        tbl.rows[i].height = row_h
+    for j, c in enumerate(d.columns):
+        cell = tbl.cell(0, j)
+        cell.text = _short(c, 25)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = _rgb("1F4E78")
+        p = cell.text_frame.paragraphs[0]
+        p.font.size = Pt(fs)
+        p.font.bold = True
+        p.font.color.rgb = _rgb("FFFFFF")
+        p.alignment = PP_ALIGN.CENTER
+    for i in range(rows):
+        for j in range(cols):
+            cell = tbl.cell(i + 1, j)
+            cell.text = _fmt_cell(d.iat[i, j])
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = _rgb("F2F6FA" if i % 2 else "FFFFFF")
+            p = cell.text_frame.paragraphs[0]
+            p.font.size = Pt(fs)
+            p.font.color.rgb = _rgb("000000")
+            p.alignment = PP_ALIGN.LEFT if j == 0 else PP_ALIGN.RIGHT
+            cell.margin_top = cell.margin_bottom = Inches(0.02)
+    return tbl
+
+
+def _ppt_table_slides(prs, title, d, rows_per=14, max_cols=9, fs=10):
+    if d is None or d.empty:
+        return
+    d = d.copy()
+    cols = list(d.columns)
+    first, rest = cols[0], cols[1:]
+    per = max(max_cols - 1, 1)
+    col_chunks = [rest[i:i + per] for i in range(0, len(rest), per)] or [[]]
+    row_chunks = [d.iloc[i:i + rows_per] for i in range(0, len(d), rows_per)]
+    total, n = len(col_chunks) * len(row_chunks), 0
+    for cc in col_chunks:
+        for rc in row_chunks:
+            n += 1
+            s = _ppt_slide(prs, title + (f" ({n}/{total})" if total > 1 else ""))
+            _ppt_table(s, rc[[first] + cc], 0.4, 1.05, 12.5, min(0.36 * (len(rc) + 1), 5.9), fs)
+
+
+def _agg(d, by):
+    return (d.groupby(by).agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"), Events=("Hours", "count")))
+
+
+def build_ppt_report(df, cost_per_unit, cal_hours, master_list, period_order, label_to_code, cap_label):
+    C = XL_CHART_TYPE
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    types = sorted(df["Type"].unique())
+    years = sorted(df["Year"].unique())
+    month_abbr = [calendar.month_abbr[i] for i in range(1, 13)]
+    LW, RL = 6.1, 6.8   # half-width chart size / right column left
+
+    # ------------------------------------------------ title slide
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    bg = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+    bg.fill.solid()
+    bg.fill.fore_color.rgb = _rgb("1F4E78")
+    bg.line.fill.background()
+    _ppt_text(s, "Breakdown & Production Loss Analysis", 0.8, 1.9, 11.7, 1.2, 38, True, "FFFFFF")
+    _ppt_text(s, "Created by: Vikas Singh | Department: Instrumentation | Version: 2.0", 0.8, 3.3, 11.7, 0.5, 18, False, "FFFFFF")
+    _ppt_text(s, "CFT Members: TL J.C Ray (Mechanical), Ajit Dasha (Electrical), "
+                 "Vikas Singh (Instrumentation), Bhaskar Ghormare (Dyeing)", 0.8, 3.9, 11.7, 0.9, 16, False, "FFFFFF")
+    _ppt_text(s, f"Data: {period_order[0]} to {period_order[-1]}  |  {len(df):,} events  |  "
+                 f"Generated {datetime.now():%d-%b-%Y}", 0.8, 5.0, 11.7, 0.5, 14, False, "DDEBF7")
+
+    # ================================================ TAB 1 - OVERVIEW
+    bt = _agg(df, "Type").reset_index().round(2)
+    s = _ppt_slide(prs, "1. Overview - KPIs")
+    _ppt_kpis(s, [("Total Hours", f"{df['Hours'].sum():,.1f}"), ("Total Loss", f"{df['Loss'].sum():,.1f}"),
+                  ("Total Events", f"{len(df):,}"), ("Avg Hours/Event", f"{df['Hours'].mean():,.2f}")])
+    _ppt_table(s, bt, 0.4, 2.8, 12.5, 0.4 * (len(bt) + 1), 12)
+
+    s = _ppt_slide(prs, "1. Overview - Distribution by Breakdown Type")
+    if bt["Hours"].sum() > 0:
+        _ppt_chart(s, C.PIE, bt["Type"], {"Hours": bt["Hours"]}, "Breakdown Hours by Type", 0.4, 1.0, LW, 5.9, colors=PPT_SET2)
+    if bt["Loss"].sum() > 0:
+        _ppt_chart(s, C.PIE, bt["Type"], {"Loss": bt["Loss"]}, "Production Loss by Type", RL, 1.0, LW, 5.9, colors=PPT_PASTEL)
+
+    mon = _agg(df, "Period_Label").reindex(period_order)
+    s = _ppt_slide(prs, "1. Overview - Monthly Hours & Production Loss")
+    _ppt_chart(s, C.COLUMN_CLUSTERED, mon.index, {"Hours": mon["Hours"]}, "Monthly Breakdown Hours", 0.4, 1.0, LW, 5.9,
+               colors=["1F4E78"], labels=True)
+    _ppt_chart(s, C.LINE_MARKERS, mon.index, {"Production Loss": mon["Loss"]}, "Monthly Production Loss", RL, 1.0, LW, 5.9,
+               colors=["E74C3C"])
+
+    # ================================================ TAB 2 - MONTH COMPARISON
+    mp = mon.copy()
+    for c in ["Hours", "Loss", "Events"]:
+        mp[f"{c} MoM %"] = mp[c].pct_change() * 100
+    if len(period_order) >= 2:
+        s = _ppt_slide(prs, f"2. Month Comparison - {period_order[-1]} vs {period_order[-2]}")
+        items = []
+        for c in ["Hours", "Loss", "Events"]:
+            ch = mp[f"{c} MoM %"].iloc[-1]
+            items.append((f"{c} ({period_order[-1]})",
+                          f"{mp[c].iloc[-1]:,.1f}  ({ch:+.1f}%)" if pd.notna(ch) else f"{mp[c].iloc[-1]:,.1f}  (n/a)"))
+        _ppt_kpis(s, items, per_row=3)
+    _ppt_table_slides(prs, "2. Month Comparison - Monthly Summary & MoM %", mp.reset_index().rename(
+        columns={"Period_Label": "Period"}).round(2), rows_per=14, max_cols=7)
+
+    pv = df.pivot_table(index="Period_Label", columns="Type", values="Hours", aggfunc="sum", fill_value=0).reindex(period_order)
+    s = _ppt_slide(prs, "2. Month Comparison - Hours by Breakdown Type")
+    _ppt_pivot_chart(s, C.COLUMN_CLUSTERED, pv, "Hours by Breakdown Type per Month", 0.4, 1.0, 12.5, 5.9)
+
+    top15 = df.groupby("Machine")["Hours"].sum().nlargest(15).index.tolist()
+    last6 = period_order[-6:]
+    pv = (df[df["Machine"].isin(top15)].pivot_table(index="Machine", columns="Period_Label", values="Hours",
+                                                    aggfunc="sum", fill_value=0).reindex(top15))
+    pv = pv[[c for c in last6 if c in pv.columns]]
+    s = _ppt_slide(prs, "2. Month Comparison - Hours by Machine (Top 15 machines, last 6 months)")
+    _ppt_pivot_chart(s, C.COLUMN_CLUSTERED, pv, "Hours by Machine per Month", 0.4, 1.0, 12.5, 5.9)
+
+    _ppt_table_slides(prs, "2. Month Comparison - Machine x Month (Hours)",
+                      pivot(df, "Machine", "Period_Label", period_order).reset_index(), rows_per=13, max_cols=9, fs=9)
+    _ppt_table_slides(prs, "2. Month Comparison - Breakdown Type x Month (Hours)",
+                      pivot(df, "Type", "Period_Label", period_order).reset_index(), rows_per=13, max_cols=9, fs=9)
+
+    # ================================================ TAB 3 - YEAR COMPARISON
+    ty = df.pivot_table(index="Year", columns="Type", values="Hours", aggfunc="sum", fill_value=0)
+    s = _ppt_slide(prs, "3. Year Comparison - Hours by Year")
+    _ppt_pivot_chart(s, C.COLUMN_CLUSTERED, ty, "Hours by Year & Breakdown Type", 0.4, 1.0, LW, 5.9)
+    my = (df.pivot_table(index="Month", columns="Year", values="Hours", aggfunc="sum", fill_value=0)
+          .reindex(range(1, 13)).fillna(0))
+    my.index = month_abbr
+    _ppt_pivot_chart(s, C.COLUMN_CLUSTERED, my, "Hours by Month & Year", RL, 1.0, LW, 5.9)
+    _ppt_table_slides(prs, "3. Year Comparison - Breakdown Type x Year (Hours)", pivot(df, "Type", "Year").reset_index(), max_cols=9)
+    _ppt_table_slides(prs, "3. Year Comparison - Machine x Year (Hours)", pivot(df, "Machine", "Year").reset_index(),
+                      rows_per=13, max_cols=9, fs=9)
+
+    # ================================================ TAB 4 - YEARLY ANALYSIS
+    for yr_ in years:
+        dy = df[df["Year"] == yr_]
+        mt = _agg(dy, ["Month", "Period_Label"]).reset_index().sort_values("Month")
+        mt["Cumulative Hours"] = mt["Hours"].cumsum()
+        s = _ppt_slide(prs, f"4. Yearly Analysis - {yr_}")
+        _ppt_kpis(s, [("Total Hours", f"{dy['Hours'].sum():,.1f}"), ("Total Loss", f"{dy['Loss'].sum():,.1f}"),
+                      ("Total Events", f"{len(dy):,}"), ("Avg Hours/Event", f"{dy['Hours'].mean():,.2f}")], h=1.1)
+        _ppt_chart(s, C.COLUMN_CLUSTERED, mt["Period_Label"], {"Monthly Hours": mt["Hours"]}, "Monthly Hours",
+                   0.4, 2.45, LW, 4.5, colors=["1F4E78"], labels=True)
+        _ppt_chart(s, C.LINE_MARKERS, mt["Period_Label"], {"Cumulative Hours": mt["Cumulative Hours"]}, "Cumulative Hours",
+                   RL, 2.45, LW, 4.5, colors=["E74C3C"])
+        _ppt_table_slides(prs, f"4. Yearly Analysis - {yr_} Month-by-Month",
+                          mt.drop(columns="Month").rename(columns={"Period_Label": "Month"}).round(2))
+
+    # ================================================ TAB 5 - CAPACITY
+    code = label_to_code[cap_label]
+    yy, mm = int(code[:4]), int(code[5:7])
+    days = calendar.monthrange(yy, mm)[1]
+    if code in cal_hours:
+        avail_hrs, src = cal_hours[code], "production calendar"
     else:
-        data['Date'] = pd.NaT
-        data['FY_Label'] = "Unknown"
-        
-    data['Total Hrs'] = pd.to_numeric(data['Total Hrs'], errors='coerce').fillna(0)
-    data['Production Loss'] = pd.to_numeric(data['Production Loss'], errors='coerce').fillna(0)
-    data = data.dropna(subset=['M/C Name', 'Reason of Breakdown'])
+        avail_hrs, src = 20 * days, f"default 20 hrs x {days} days"
+    universe = master_list if master_list else sorted(df["Machine"].unique())
+    dfp = df[df["Period_Label"] == cap_label]
 
-    period_key, period_label = parse_period(uploaded.name)
-    data['Period_Key'] = period_key
-    data['Period'] = period_label
-    data['Source File'] = uploaded.name
-    return data
+    rows = []
+    for mc in universe:
+        dm = dfp[dfp["Machine"] == mc]
+        hrs, ev = dm["Hours"].sum(), len(dm)
+        up = max(avail_hrs - hrs, 0)
+        rows.append({"Machine": mc, "Hours": round(hrs, 2), "Events": ev, "Loss": round(dm["Loss"].sum(), 2),
+                     "Availability %": round(up / avail_hrs * 100, 2) if avail_hrs else None,
+                     "MTBF (hrs)": round(up / ev, 2) if ev else None,
+                     "MTTR (hrs)": round(hrs / ev, 2) if ev else None})
+    ms_all = pd.DataFrame(rows)
+    n_m = len(universe)
+    with_bd = int((ms_all["Events"] > 0).sum())
+    cap = n_m * avail_hrs
+    bd_h = ms_all["Hours"].sum()
+    tot_ev = int(ms_all["Events"].sum())
+    av = (cap - bd_h) / cap * 100 if cap else 0
+    mtbf = (cap - bd_h) / tot_ev if tot_ev else None
+    mttr = bd_h / tot_ev if tot_ev else None
+
+    s = _ppt_slide(prs, f"5. Capacity Analysis - {cap_label}")
+    _ppt_kpis(s, [("Total Machines", n_m), ("With Breakdown", with_bd), ("Without Breakdown", n_m - with_bd),
+                  ("Plant Capacity (hrs)", f"{cap:,.0f}"), ("Breakdown Hours", f"{bd_h:,.1f}"),
+                  ("Availability %", f"{av:.2f}%"), ("Downtime %", f"{100 - av:.2f}%"), ("Events", tot_ev),
+                  ("MTBF - Overall (hrs)", f"{mtbf:,.2f}" if mtbf else "n/a"),
+                  ("MTTR - Overall (hrs)", f"{mttr:,.2f}" if mttr else "n/a")], per_row=5, h=1.3)
+    _ppt_text(s, f"Available hours per machine: {avail_hrs:,.1f} (source: {src})", 0.4, 4.2, 12.5, 0.4, 13, False, "595959")
+
+    s = _ppt_slide(prs, f"5. Capacity Analysis - Machines & Downtime ({cap_label})")
+    _ppt_chart(s, C.PIE, ["With Breakdown", "Without Breakdown"], {"Machines": [with_bd, n_m - with_bd]},
+               "Machines With / Without Breakdown", 0.4, 1.0, LW, 5.9, colors=["E74C3C", "2ECC71"])
+    dtp = dfp.groupby("Type")["Hours"].sum()
+    if dtp.sum() > 0:
+        _ppt_chart(s, C.PIE, dtp.index, {"Hours": dtp.values}, "Downtime by Type", RL, 1.0, LW, 5.9, colors=PPT_SET2)
+
+    _ppt_table_slides(prs, f"5. Capacity Analysis - Machine Statistics ({cap_label})", ms_all, rows_per=14, max_cols=7)
+
+    trows = []
+    for mc in universe:
+        for tp in types:
+            dm = dfp[(dfp["Machine"] == mc) & (dfp["Type"] == tp)]
+            if len(dm):
+                hrs = dm["Hours"].sum()
+                trows.append({"Machine": mc, "Type": tp, "Hours": hrs, "MTTR": hrs / len(dm),
+                              "MTBF": max(avail_hrs - hrs, 0) / len(dm)})
+    tdf = pd.DataFrame(trows)
+    if not tdf.empty:
+        topm = tdf.groupby("Machine")["Hours"].sum().nlargest(15).index.tolist()
+        for metric, ttl in [("MTTR", "MTTR by Machine & Type (hrs)"), ("MTBF", "MTBF by Machine & Type (hrs)")]:
+            pvt = tdf[tdf["Machine"].isin(topm)].pivot_table(index="Machine", columns="Type", values=metric,
+                                                              aggfunc="mean", fill_value=0).reindex(topm)
+            s = _ppt_slide(prs, f"5. Capacity Analysis - {ttl} ({cap_label}, top 15 machines)")
+            _ppt_pivot_chart(s, C.COLUMN_CLUSTERED, pvt, ttl, 0.4, 1.0, 12.5, 5.9)
+
+    ms = ms_all.dropna(subset=["MTTR (hrs)", "MTBF (hrs)"])
+    if not ms.empty:
+        a = ms.sort_values("MTTR (hrs)", ascending=False).head(15)
+        b = ms.sort_values("MTBF (hrs)", ascending=True).head(15)
+        s = _ppt_slide(prs, f"5. Capacity Analysis - Machine-wise MTTR & MTBF ({cap_label}, worst 15)")
+        _ppt_chart(s, C.BAR_CLUSTERED, a["Machine"], {"MTTR (hrs)": a["MTTR (hrs)"]}, "MTTR (highest to lowest)",
+                   0.4, 1.0, LW, 5.9, point_colors=_grad(a["MTTR (hrs)"], True), reverse=True, labels=True, numfmt="0.0")
+        _ppt_chart(s, C.BAR_CLUSTERED, b["Machine"], {"MTBF (hrs)": b["MTBF (hrs)"]}, "MTBF (lowest to highest)",
+                   RL, 1.0, LW, 5.9, point_colors=_grad(b["MTBF (hrs)"], False), reverse=True, labels=True, numfmt="0.0")
+
+        s = _ppt_slide(prs, f"5. Capacity Analysis - MTTR vs MTBF ({cap_label}, top 15 by MTTR)")
+        _ppt_chart(s, C.COLUMN_CLUSTERED, a["Machine"], {"MTTR (hrs)": a["MTTR (hrs)"]}, "MTTR (hrs)",
+                   0.4, 1.0, LW, 5.9, colors=["E74C3C"])
+        _ppt_chart(s, C.LINE_MARKERS, a["Machine"], {"MTBF (hrs)": a["MTBF (hrs)"]}, "MTBF (hrs)",
+                   RL, 1.0, LW, 5.9, colors=["1F4E78"])
+
+        s = _ppt_slide(prs, f"5. Capacity Analysis - Top 10 Worst Machines ({cap_label})")
+        _ppt_text(s, "By MTTR (highest)", 0.4, 0.95, LW, 0.35, 14, True, "1F4E78")
+        w1 = ms.nlargest(10, "MTTR (hrs)")[["Machine", "Events", "Hours", "MTTR (hrs)"]]
+        _ppt_table(s, w1, 0.4, 1.4, LW, 0.4 * (len(w1) + 1), 10)
+        _ppt_text(s, "By MTBF (lowest)", RL, 0.95, LW, 0.35, 14, True, "1F4E78")
+        w2 = ms.nsmallest(10, "MTBF (hrs)")[["Machine", "Events", "Hours", "MTBF (hrs)"]]
+        _ppt_table(s, w2, RL, 1.4, LW, 0.4 * (len(w2) + 1), 10)
+
+    trend = []
+    for p in period_order:
+        pc = label_to_code[p]
+        av_h = cal_hours.get(pc, 20 * calendar.monthrange(int(pc[:4]), int(pc[5:7]))[1])
+        pcap = n_m * av_h
+        ph = df[df["Period_Label"] == p]["Hours"].sum()
+        trend.append({"Period": p, "Available hrs/machine": round(av_h, 1), "Plant Capacity": round(pcap, 1),
+                      "Breakdown Hours": round(ph, 2), "Availability %": round((pcap - ph) / pcap * 100, 2) if pcap else None})
+    trend = pd.DataFrame(trend)
+    s = _ppt_slide(prs, "5. Capacity Analysis - Plant Availability Trend (all periods)")
+    _ppt_chart(s, C.LINE_MARKERS, trend["Period"], {"Availability %": trend["Availability %"]}, "Plant Availability %",
+               0.4, 1.0, 12.5, 5.9, colors=["2ECC71"], labels=True, numfmt="0.0")
+    _ppt_table_slides(prs, "5. Capacity Analysis - Availability by Period", trend, max_cols=6)
+
+    # ================================================ TAB 6 - MACHINE-WISE
+    mw = _agg(df, "Machine").sort_values("Hours", ascending=False).reset_index().round(2)
+    _ppt_table_slides(prs, "6. Machine-wise - Hours, Loss & Events", mw, rows_per=14, max_cols=5)
+    top20 = mw.head(20)
+    s = _ppt_slide(prs, "6. Machine-wise - Hours vs Production Loss (Top 20 machines)")
+    _ppt_chart(s, C.COLUMN_CLUSTERED, top20["Machine"], {"Hours": top20["Hours"]}, "Breakdown Hours", 0.4, 1.0, LW, 5.9, colors=["1F4E78"])
+    _ppt_chart(s, C.COLUMN_CLUSTERED, top20["Machine"], {"Loss": top20["Loss"]}, "Production Loss", RL, 1.0, LW, 5.9, colors=["E74C3C"])
+    names20 = top20["Machine"].tolist()
+    pv = df[df["Machine"].isin(names20)].pivot_table(index="Machine", columns="Type", values="Hours", aggfunc="sum", fill_value=0).reindex(names20)
+    s = _ppt_slide(prs, "6. Machine-wise - Breakdown Type per Machine (Top 20)")
+    _ppt_pivot_chart(s, C.COLUMN_STACKED, pv, "Hours by Type per Machine", 0.4, 1.0, 12.5, 5.9)
+    pv = df[df["Machine"].isin(names20)].pivot_table(index="Machine", columns="Shift", values="Hours", aggfunc="sum", fill_value=0).reindex(names20)
+    s = _ppt_slide(prs, "6. Machine-wise - Shift-wise Breakdown Hours (Top 20)")
+    _ppt_pivot_chart(s, C.COLUMN_STACKED, pv, "Hours by Shift per Machine", 0.4, 1.0, 12.5, 5.9)
+
+    # ================================================ TAB 7 - CAUSES
+    cz = _agg(df, "Cause").sort_values("Hours", ascending=False).reset_index().round(2)
+    _ppt_table_slides(prs, "7. Causes - Top Causes", cz, rows_per=14, max_cols=5)
+    t10 = cz.head(10)
+    s = _ppt_slide(prs, "7. Causes - Top 10 Causes by Hours")
+    _ppt_chart(s, C.BAR_CLUSTERED, t10["Cause"], {"Hours": t10["Hours"]}, "Top 10 Causes (Hours)", 0.4, 1.0, 12.5, 5.9,
+               point_colors=_grad(t10["Hours"], True), reverse=True, labels=True)
+    top15c = cz.head(15)["Cause"].tolist()
+    cm = pivot(df[df["Cause"].isin(top15c)], "Cause", "Machine")
+    keep = cm.drop(columns="Total").sum().nlargest(8).index.tolist()
+    cm = cm[keep + ["Total"]].reset_index()
+    _ppt_table_slides(prs, "7. Causes - Cause x Machine (Top 15 causes, top 8 machines, Hours)", cm, rows_per=15, max_cols=10, fs=9)
+    t10c = cz.head(10)["Cause"].tolist()
+    pv = (df[df["Cause"].isin(t10c)].pivot_table(index="Cause", columns="Period_Label", values="Hours", aggfunc="sum", fill_value=0)
+          .reindex(t10c))
+    pv = pv[[c for c in period_order[-6:] if c in pv.columns]]
+    s = _ppt_slide(prs, "7. Causes - Top 10 Causes across Months (last 6 months)")
+    _ppt_pivot_chart(s, C.COLUMN_CLUSTERED, pv, "Hours by Cause per Month", 0.4, 1.0, 12.5, 5.9)
+
+    # ================================================ TAB 8 - YTD
+    fy_order = [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3]
+    for fy_ in sorted(df["FY_Label"].unique()):
+        dfy = df[df["FY_Label"] == fy_]
+        mf = _agg(dfy, "Month").reindex(fy_order).dropna(how="all").fillna(0).reset_index()
+        mf["Month"] = mf["Month"].apply(lambda m: calendar.month_abbr[int(m)])
+        mf["Cumulative Hours"] = mf["Hours"].cumsum()
+        mf["Cost (Rs)"] = mf["Loss"] * cost_per_unit
+        s = _ppt_slide(prs, f"8. YTD (Fiscal Year) - FY {fy_}")
+        _ppt_kpis(s, [("YTD Hours", f"{dfy['Hours'].sum():,.1f}"), ("YTD Loss", f"{dfy['Loss'].sum():,.1f}"),
+                      ("YTD Cost (Rs)", f"{dfy['Loss'].sum() * cost_per_unit:,.0f}"), ("YTD Events", f"{len(dfy):,}")], h=1.1)
+        _ppt_chart(s, C.COLUMN_CLUSTERED, mf["Month"], {"Monthly Hours": mf["Hours"]}, "Monthly Hours (Apr - Mar)",
+                   0.4, 2.45, LW, 4.5, colors=["1F4E78"], labels=True)
+        _ppt_chart(s, C.LINE_MARKERS, mf["Month"], {"Cumulative Hours": mf["Cumulative Hours"]}, "Cumulative Hours",
+                   RL, 2.45, LW, 4.5, colors=["E74C3C"])
+        _ppt_table_slides(prs, f"8. YTD (Fiscal Year) - FY {fy_} Monthly Detail", mf.round(2), max_cols=7)
+
+    out = io.BytesIO()
+    prs.save(out)
+    return out.getvalue()
 
 
-# ============================================================
-# SIDEBAR UPLOADS
-# ============================================================
-st.sidebar.header("📤 Upload Files")
+# =====================================================================
+# 2. SIDEBAR
+# =====================================================================
+st.sidebar.header("📁 Upload Files")
+bd_files = st.sidebar.file_uploader("Breakdown Excel files", type=["xlsx", "xls"],
+                                    accept_multiple_files=True, key="bd_files")
+master_file = st.sidebar.file_uploader("Master Machine List (machines.xlsx)", type=["xlsx", "xls"],
+                                       key="master_file")
+cal_files = st.sidebar.file_uploader("Production Calendar Excel files", type=["xlsx", "xls"],
+                                     accept_multiple_files=True, key="cal_files")
 
-breakdown_files = st.sidebar.file_uploader(
-    "Breakdown Excel file(s) — one per month",
-    type=["xlsx", "xls"],
-    accept_multiple_files=True,
-    key="breakdown"
-)
-
-machines_file = st.sidebar.file_uploader(
-    "Master Machine List (machines.xlsx)",
-    type=["xlsx", "xls"],
-    key="machines"
-)
-
-calendar_files = st.sidebar.file_uploader(
-    "Production Calendar(s) — one per month",
-    type=["xlsx", "xls"],
-    accept_multiple_files=True,
-    key="calendars"
-)
-
-# ---------- RESET BUTTON ----------
-st.sidebar.markdown("---")
-if st.sidebar.button("Clear All Uploaded Files", use_container_width=True):
-    for key in ["breakdown", "machines", "calendars"]:
-        if key in st.session_state:
-            del st.session_state[key]
+if st.sidebar.button("🗑️ Clear All Uploaded Files"):
+    st.session_state.clear()
     st.rerun()
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 💰 Cost Settings")
-cost_per_unit = st.sidebar.number_input("Cost per unit (₹)", min_value=0.0, value=50.0, step=1.0,help="Cost of producing one unit in ₹")
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 👤 Created by")
-st.sidebar.markdown("**Vikas Singh**")
-st.sidebar.caption("Instrumentation Dept.")
+st.sidebar.header("💰 Cost Settings")
+cost_per_unit = st.sidebar.number_input("Cost per unit (₹)", min_value=0.0, value=50.0, step=1.0)
 
-# ============================================================
-# MAIN
-# ============================================================
-if breakdown_files:
-    all_data = []
-    for f in breakdown_files:
-        try:
-            all_data.append(read_breakdown_file(f))
-        except Exception as e:
-            st.error(f"❌ Could not read {f.name}: {e}")
+if not bd_files:
+    st.info("👈 Upload one or more Breakdown Excel files from the sidebar to begin. "
+            "File names should contain the period, e.g. `Breakdown_2025-06.xlsx` or `Jun-25.xlsx`.")
+    st.stop()
 
-    if not all_data:
-        st.stop()
-
-    data = pd.concat(all_data, ignore_index=True)
-    data = data.sort_values('Period_Key')
-
-    # ---- Master machine list ----
-    master_machines = []
-    if machines_file:
-        try:
-            mdf = pd.read_excel(machines_file)
-            mdf.columns = [str(c).strip() for c in mdf.columns]
-            col = 'Machine Name' if 'Machine Name' in mdf.columns else mdf.columns[0]
-            master_machines = sorted(mdf[col].dropna().astype(str).unique().tolist())
-            st.sidebar.success(f"✅ {len(master_machines)} machines in master list")
-        except Exception as e:
-            st.sidebar.error(f"❌ Machine list error: {e}")
-
-    # ---- Calendars ----
-    calendar_data = {}
-    if calendar_files:
-        for cf in calendar_files:
-            try:
-                cdf = pd.read_excel(cf)
-                cdf.columns = [str(c).strip() for c in cdf.columns]
-                date_col = None
-                hr_col = None
-                for c in cdf.columns:
-                    if 'date' in c.lower() and date_col is None:
-                        date_col = c
-                    if ('hour' in c.lower() or 'avail' in c.lower()) and hr_col is None:
-                        hr_col = c
-                if date_col is None or hr_col is None:
-                    continue
-                cdf[date_col] = pd.to_datetime(cdf[date_col], errors='coerce')
-                cdf = cdf.dropna(subset=[date_col])
-                cdf['Period_Key'] = cdf[date_col].dt.strftime('%Y-%m')
-                totals = cdf.groupby('Period_Key')[hr_col].sum().to_dict()
-                calendar_data.update(totals)
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Calendar {cf.name}: {e}")
-
-    st.success(f"✅ Loaded {len(data)} records from {len(breakdown_files)} file(s): "
-               f"{', '.join(sorted(data['Period'].unique()))}")
-
-    # ---- SIDEBAR FILTERS ----
-    st.sidebar.header("🔍 Filters")
-    periods = sorted(data['Period'].unique())
-    sel_periods = st.sidebar.multiselect("Period (Month-Year)", periods, default=periods)
-
-    machines = sorted(data['M/C Name'].astype(str).unique())
-    sel_machines = st.sidebar.multiselect("Machine", machines, default=machines)
-
-    types = sorted(data['Breakdown Type'].unique())
-    sel_types = st.sidebar.multiselect("Breakdown Type", types, default=types)
-
-    shifts = sorted(data['Shift'].dropna().astype(str).unique())
-    sel_shifts = st.sidebar.multiselect("Shift", shifts, default=shifts)
-
-    df = data[
-        data['Period'].isin(sel_periods)
-        & data['M/C Name'].astype(str).isin(sel_machines)
-        & data['Breakdown Type'].isin(sel_types)
-        & data['Shift'].astype(str).isin(sel_shifts)
-    ]
-
-    df['Year'] = df['Period_Key'].str[:4]
-    df['Month_Num'] = df['Period_Key'].str[5:7]
-    df['Month_Name'] = df['Month_Num'].map(MONTH_NAMES)
-
-    # ============================================================
-    # TABS
-    # ============================================================
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "📊 Overview",
-        "📅 Month Comparison",
-        "📈 Year Comparison",
-        "🏆 Yearly Analysis",
-        "🏭 Capacity Analysis",
-        "🔧 Machine-wise",
-        "🔁 Causes",
-        "📆 YTD (Fiscal Year)"
-    ])
-
-    # ---------- TAB 1: OVERVIEW ----------
-    with tab1:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Breakdown Hours", f"{df['Total Hrs'].sum():,.1f}")
-        c2.metric("Total Production Loss", f"{df['Production Loss'].sum():,.0f}")
-        c3.metric("Total Breakdown Events", len(df))
-        c4.metric("Avg Hours/Event", f"{df['Total Hrs'].mean():.2f}" if len(df) else "0")
-
-        st.divider()
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Breakdown Hours by Type")
-            pie = df.groupby('Breakdown Type')['Total Hrs'].sum().reset_index()
-            if len(pie) > 0:
-                fig = px.pie(pie, names='Breakdown Type', values='Total Hrs', hole=0.4,
-                             color_discrete_sequence=px.colors.qualitative.Set2)
-                st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            st.subheader("Production Loss by Type")
-            pie2 = df.groupby('Breakdown Type')['Production Loss'].sum().reset_index()
-            if len(pie2) > 0:
-                fig = px.pie(pie2, names='Breakdown Type', values='Production Loss', hole=0.4,
-                             color_discrete_sequence=px.colors.qualitative.Pastel)
-                st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("📅 Monthly Trend — Hours & Loss")
-        trend = df.groupby('Period_Key').agg(
-            Period=('Period', 'first'),
-            Hours=('Total Hrs', 'sum'),
-            Loss=('Production Loss', 'sum'),
-            Events=('Total Hrs', 'count')
-        ).reset_index().sort_values('Period_Key')
-
-        if len(trend) > 0:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=trend['Period'], y=trend['Hours'],
-                                 name='Breakdown Hours', yaxis='y',
-                                 marker_color='#1F4E78'))
-            fig.add_trace(go.Scatter(x=trend['Period'], y=trend['Loss'],
-                                     name='Production Loss', yaxis='y2',
-                                     mode='lines+markers',
-                                     line=dict(color='#E74C3C', width=3)))
-            fig.update_layout(
-                yaxis=dict(title='Breakdown Hours'),
-                yaxis2=dict(title='Production Loss', overlaying='y', side='right'),
-                hovermode='x unified', height=450
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("📋 Detailed Records (Top 200)")
-        st.dataframe(df.head(200), use_container_width=True, hide_index=True)
-
-    # ---------- TAB 2: MONTH COMPARISON ----------
-    with tab2:
-        if len(sel_periods) < 2:
-            st.info("👆 Upload at least 2 files to compare months.")
+# ---------- load data ----------
+frames, errors = [], []
+for f in bd_files:
+    try:
+        d = read_breakdown_file(f)
+        if d.empty:
+            errors.append(f"{f.name}: no usable rows (check 'M/C Name' and 'Total Hrs' columns).")
         else:
-            st.subheader("📅 Month-over-Month Comparison")
-            p1, p2 = sel_periods[0], sel_periods[-1]
-            df1, df2 = df[df['Period'] == p1], df[df['Period'] == p2]
+            frames.append(d)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"{f.name}: {e}")
+for e in errors:
+    st.sidebar.warning(e)
+if not frames:
+    st.error("No valid breakdown data could be read.")
+    st.stop()
 
-            hours1, hours2 = df1['Total Hrs'].sum(), df2['Total Hrs'].sum()
-            loss1, loss2 = df1['Production Loss'].sum(), df2['Production Loss'].sum()
-            ev1, ev2 = len(df1), len(df2)
+df_all = pd.concat(frames, ignore_index=True)
 
-            dh = ((hours2 - hours1) / hours1 * 100) if hours1 else 0
-            dl = ((loss2 - loss1) / loss1 * 100) if loss1 else 0
-            de = ((ev2 - ev1) / ev1 * 100) if ev1 else 0
+master_list = []
+if master_file is not None:
+    try:
+        master_list = read_master(master_file)
+    except Exception as e:  # noqa: BLE001
+        st.sidebar.warning(f"Master list error: {e}")
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric(f"Hours ({p2} vs {p1})", f"{hours2:,.1f}", f"{dh:+.1f}%")
-            c2.metric(f"Loss ({p2} vs {p1})", f"{loss2:,.0f}", f"{dl:+.1f}%")
-            c3.metric(f"Events ({p2} vs {p1})", f"{ev2}", f"{de:+.1f}%")
+if master_list:
+    mmap = {norm_name(n): n for n in master_list}
+    df_all["Machine"] = df_all["Machine"].apply(lambda x: mmap.get(norm_name(x), x))
 
-            st.divider()
-            st.subheader("By Breakdown Type")
-            cmp_type = df.groupby(['Period_Key', 'Period', 'Breakdown Type'])['Total Hrs'].sum().reset_index()
-            if len(cmp_type) > 0:
-                fig = px.bar(cmp_type, x='Breakdown Type', y='Total Hrs', color='Period',
-                             barmode='group', text_auto='.1f')
-                st.plotly_chart(fig, use_container_width=True)
+cal_hours = {}
+if cal_files:
+    try:
+        cal_hours = read_calendars(cal_files)
+    except Exception as e:  # noqa: BLE001
+        st.sidebar.warning(f"Calendar error: {e}")
 
-            st.subheader("By Machine")
-            cmp_mach = df.groupby(['Period_Key', 'Period', 'M/C Name'])['Total Hrs'].sum().reset_index()
-            if len(cmp_mach) > 0:
-                fig = px.bar(cmp_mach, x='M/C Name', y='Total Hrs', color='Period',
-                             barmode='group', text_auto='.1f')
-                st.plotly_chart(fig, use_container_width=True)
+# ---------- period ordering ----------
+label_to_code = dict(zip(df_all["Period_Label"], df_all["Period"]))
+all_periods = sorted(label_to_code, key=lambda l: label_to_code[l])
 
-            st.subheader("Pivot — Machine × Month (Hours)")
-            st.dataframe(df.pivot_table(index='M/C Name', columns='Period',
-                                        values='Total Hrs', aggfunc='sum', fill_value=0),
-                         use_container_width=True)
+# ---------- filters ----------
+st.sidebar.header("🔎 Filters")
+sel_period = st.sidebar.multiselect("Period", all_periods, default=all_periods)
+all_machines = sorted(df_all["Machine"].unique())
+sel_machine = st.sidebar.multiselect("Machine", all_machines, default=all_machines)
+all_types = sorted(df_all["Type"].unique())
+sel_type = st.sidebar.multiselect("Breakdown Type", all_types, default=all_types)
+all_shifts = sorted(df_all["Shift"].unique())
+sel_shift = st.sidebar.multiselect("Shift", all_shifts, default=all_shifts)
 
-            st.subheader("Pivot — Type × Month (Hours)")
-            st.dataframe(df.pivot_table(index='Breakdown Type', columns='Period',
-                                        values='Total Hrs', aggfunc='sum', fill_value=0),
-                         use_container_width=True)
+df = df_all[
+    df_all["Period_Label"].isin(sel_period)
+    & df_all["Machine"].isin(sel_machine)
+    & df_all["Type"].isin(sel_type)
+    & df_all["Shift"].isin(sel_shift)
+].copy()
 
-    # ---------- TAB 3: YEAR COMPARISON ----------
-    with tab3:
-        years = sorted(df['Year'].unique())
-        if len(years) < 2:
-            st.info("👆 Upload files from 2 different years to compare.")
+if df.empty:
+    st.warning("No data matches the selected filters.")
+    st.stop()
+
+period_order = [p for p in all_periods if p in set(df["Period_Label"])]
+years = sorted(df["Year"].unique())
+MONTH_ABBR = [calendar.month_abbr[i] for i in range(1, 13)]
+
+# =====================================================================
+# 4. TABS
+# =====================================================================
+tabs = st.tabs(["📊 Overview", "📅 Month Comparison", "📈 Year Comparison", "🏆 Yearly Analysis",
+                "🏭 Capacity Analysis", "🔧 Machine-wise", "🔁 Causes", "📆 YTD (Fiscal Year)"])
+
+# ---------------------------------------------------------------- Tab 1
+with tabs[0]:
+    st.subheader("Overview")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Hours", f"{df['Hours'].sum():,.1f}")
+    c2.metric("Total Loss", f"{df['Loss'].sum():,.1f}")
+    c3.metric("Total Events", f"{len(df):,}")
+    c4.metric("Avg Hours/Event", f"{df['Hours'].mean():,.2f}")
+
+    by_type = df.groupby("Type").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum")).reset_index()
+    p1, p2 = st.columns(2)
+    with p1:
+        f = px.pie(by_type, names="Type", values="Hours", title="Breakdown Hours by Type",
+                   color_discrete_sequence=px.colors.qualitative.Set2)
+        show_chart(f)
+    with p2:
+        f = px.pie(by_type, names="Type", values="Loss", title="Production Loss by Type",
+                   color_discrete_sequence=px.colors.qualitative.Pastel)
+        show_chart(f)
+
+    mon = (df.groupby("Period_Label").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"))
+           .reindex(period_order).reset_index())
+    fig = go.Figure()
+    fig.add_bar(x=mon["Period_Label"], y=mon["Hours"], name="Hours", marker_color="#1F4E78")
+    fig.add_trace(go.Scatter(x=mon["Period_Label"], y=mon["Loss"], name="Production Loss",
+                             mode="lines+markers", line=dict(color="#E74C3C", width=3), yaxis="y2"))
+    fig.update_layout(title="Monthly Breakdown Hours vs Production Loss",
+                      yaxis=dict(title="Hours"),
+                      yaxis2=dict(title="Production Loss", overlaying="y", side="right"),
+                      legend=dict(orientation="h", y=1.12))
+    show_chart(fig)
+
+# ---------------------------------------------------------------- Tab 2
+with tabs[1]:
+    st.subheader("Month Comparison")
+    if len(period_order) >= 2:
+        cur_l, prev_l = period_order[-1], period_order[-2]
+        cur, prev = df[df["Period_Label"] == cur_l], df[df["Period_Label"] == prev_l]
+        st.caption(f"Latest month **{cur_l}** vs previous month **{prev_l}**")
+        m1, m2, m3 = st.columns(3)
+        for col, name, a, b in [
+            (m1, "Hours", cur["Hours"].sum(), prev["Hours"].sum()),
+            (m2, "Production Loss", cur["Loss"].sum(), prev["Loss"].sum()),
+            (m3, "Events", len(cur), len(prev)),
+        ]:
+            ch = pct_change(a, b)
+            col.metric(name, f"{a:,.1f}", f"{ch:+.1f}%" if ch is not None else "n/a", delta_color="inverse")
+    else:
+        st.info("Select at least two periods to see month-over-month change.")
+
+    g = df.groupby(["Period_Label", "Type"])["Hours"].sum().reset_index()
+    f = px.bar(g, x="Period_Label", y="Hours", color="Type", barmode="group",
+               category_orders={"Period_Label": period_order}, title="Hours by Breakdown Type per Month")
+    show_chart(f)
+
+    top_m = df.groupby("Machine")["Hours"].sum().nlargest(15).index
+    g = df[df["Machine"].isin(top_m)].groupby(["Period_Label", "Machine"])["Hours"].sum().reset_index()
+    f = px.bar(g, x="Machine", y="Hours", color="Period_Label", barmode="group",
+               category_orders={"Period_Label": period_order}, title="Hours by Machine per Month (Top 15 machines)")
+    show_chart(f)
+
+    st.markdown("**Machine × Month (Hours)**")
+    show_df(pivot(df, "Machine", "Period_Label", period_order))
+    st.markdown("**Breakdown Type × Month (Hours)**")
+    show_df(pivot(df, "Type", "Period_Label", period_order))
+
+# ---------------------------------------------------------------- Tab 3
+with tabs[2]:
+    st.subheader("Year Comparison")
+    g = df.groupby(["Year", "Type"])["Hours"].sum().reset_index()
+    g["Year"] = g["Year"].astype(str)
+    show_chart(px.bar(g, x="Year", y="Hours", color="Type", barmode="group", title="Hours by Year & Type"))
+
+    g = df.groupby(["Month", "Year"])["Hours"].sum().reset_index()
+    g["Month Name"] = g["Month"].apply(lambda m: calendar.month_abbr[m])
+    g["Year"] = g["Year"].astype(str)
+    show_chart(px.bar(g, x="Month Name", y="Hours", color="Year", barmode="group",
+                      category_orders={"Month Name": MONTH_ABBR}, title="Hours by Month & Year"))
+
+    st.markdown("**Breakdown Type × Year (Hours)**")
+    show_df(pivot(df, "Type", "Year"))
+    st.markdown("**Machine × Year (Hours)**")
+    show_df(pivot(df, "Machine", "Year"))
+
+# ---------------------------------------------------------------- Tab 4
+with tabs[3]:
+    st.subheader("Yearly Analysis")
+    yr = st.selectbox("Select Year", years, index=len(years) - 1, key="yr_sel")
+    dy = df[df["Year"] == yr]
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total Hours", f"{dy['Hours'].sum():,.1f}")
+    k2.metric("Total Loss", f"{dy['Loss'].sum():,.1f}")
+    k3.metric("Total Events", f"{len(dy):,}")
+    k4.metric("Avg Hours/Event", f"{dy['Hours'].mean():,.2f}")
+
+    mt = (dy.groupby(["Month", "Period_Label"])
+          .agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"), Events=("Hours", "count"))
+          .reset_index().sort_values("Month"))
+    mt["Cumulative Hours"] = mt["Hours"].cumsum()
+    show_df(mt.drop(columns="Month").rename(columns={"Period_Label": "Month"}).round(2), hide_index=True)
+
+    fig = go.Figure()
+    fig.add_bar(x=mt["Period_Label"], y=mt["Hours"], name="Monthly Hours", marker_color="#1F4E78")
+    fig.add_trace(go.Scatter(x=mt["Period_Label"], y=mt["Cumulative Hours"], name="Cumulative Hours",
+                             mode="lines+markers", line=dict(color="#E74C3C", width=3), yaxis="y2"))
+    fig.update_layout(title=f"Monthly & Cumulative Hours - {yr}", yaxis=dict(title="Hours"),
+                      yaxis2=dict(title="Cumulative Hours", overlaying="y", side="right"),
+                      legend=dict(orientation="h", y=1.12))
+    show_chart(fig)
+
+# ---------------------------------------------------------------- Tab 5
+with tabs[4]:
+    st.subheader("Capacity Analysis")
+    cap_label = st.selectbox("Select Period", period_order, index=len(period_order) - 1, key="cap_sel")
+    code = label_to_code[cap_label]
+    yy, mm = int(code[:4]), int(code[5:7])
+    days = calendar.monthrange(yy, mm)[1]
+    if code in cal_hours:
+        avail_hrs = cal_hours[code]
+        st.success(f"Using production calendar: {avail_hrs:,.1f} available hours per machine for {cap_label}.")
+    else:
+        avail_hrs = 20 * days
+        st.warning(f"No calendar found for {cap_label}. Using default 20 hrs × {days} days = {avail_hrs:,.0f} hrs per machine.")
+
+    dfp = df[df["Period_Label"] == cap_label]
+    if master_list:
+        universe = master_list
+    else:
+        universe = sorted(df_all["Machine"].unique())
+        st.warning("No master machine list uploaded - using machines found in breakdown data.")
+    outside = set(dfp["Machine"]) - set(universe)
+    if outside:
+        st.caption(f"{len(outside)} machine(s) in breakdown data are not in the master list and are excluded from machine counts.")
+
+    # ---- per-machine stats ----
+    rows = []
+    for mc in universe:
+        dm = dfp[dfp["Machine"] == mc]
+        hrs, ev, loss = dm["Hours"].sum(), len(dm), dm["Loss"].sum()
+        uptime = max(avail_hrs - hrs, 0)
+        rows.append({
+            "Machine": mc, "Hours": round(hrs, 2), "Events": ev, "Loss": round(loss, 2),
+            "Availability %": round(uptime / avail_hrs * 100, 2) if avail_hrs else None,
+            "MTBF (hrs)": round(uptime / ev, 2) if ev else None,
+            "MTTR (hrs)": round(hrs / ev, 2) if ev else None,
+        })
+    machine_stats_df = pd.DataFrame(rows)
+
+    total_m = len(universe)
+    with_bd = int((machine_stats_df["Events"] > 0).sum())
+    without_bd = total_m - with_bd
+    plant_cap = total_m * avail_hrs
+    bd_hours = machine_stats_df["Hours"].sum()
+    avail_pct = (plant_cap - bd_hours) / plant_cap * 100 if plant_cap else 0
+    down_pct = 100 - avail_pct
+    tot_events = int(machine_stats_df["Events"].sum())
+    mtbf_all = (plant_cap - bd_hours) / tot_events if tot_events else None
+    mttr_all = bd_hours / tot_events if tot_events else None
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Total Machines", total_m)
+    a2.metric("With Breakdown", with_bd)
+    a3.metric("Without Breakdown", without_bd)
+    a4.metric("Plant Capacity (hrs)", f"{plant_cap:,.0f}")
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Breakdown Hours", f"{bd_hours:,.1f}")
+    b2.metric("Availability %", f"{avail_pct:.2f}%")
+    b3.metric("Downtime %", f"{down_pct:.2f}%")
+    b4.metric("Events", tot_events)
+    c1, c2 = st.columns(2)
+    c1.metric("MTBF - Overall (hrs)", f"{mtbf_all:,.2f}" if mtbf_all else "n/a")
+    c2.metric("MTTR - Overall (hrs)", f"{mttr_all:,.2f}" if mttr_all else "n/a")
+
+    p1, p2 = st.columns(2)
+    with p1:
+        f = px.pie(names=["With Breakdown", "Without Breakdown"], values=[with_bd, without_bd],
+                   title="Machines With / Without Breakdown", color=["With Breakdown", "Without Breakdown"],
+                   color_discrete_map={"With Breakdown": "#E74C3C", "Without Breakdown": "#2ECC71"})
+        show_chart(f)
+    with p2:
+        dt = dfp.groupby("Type")["Hours"].sum().reset_index()
+        if dt.empty:
+            st.info("No downtime recorded in this period.")
         else:
-            st.subheader("📈 Year-over-Year Comparison")
-            yr_totals = df.groupby('Year').agg(
-                Hours=('Total Hrs', 'sum'),
-                Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count')
-            ).reset_index()
-            fig = px.bar(yr_totals, x='Year', y=['Hours', 'Loss'],
-                         barmode='group', text_auto='.1f')
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Same Month — Different Years")
-            monthly = df.groupby(['Year', 'Month_Name'])['Total Hrs'].sum().reset_index()
-            fig = px.bar(monthly, x='Month_Name', y='Total Hrs', color='Year',
-                         barmode='group', text_auto='.1f',
-                         category_orders={'Month_Name': list(MONTH_NAMES.values())})
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Type × Year (Hours)")
-            st.dataframe(df.pivot_table(index='Breakdown Type', columns='Year',
-                                        values='Total Hrs', aggfunc='sum', fill_value=0),
-                         use_container_width=True)
-
-            st.subheader("Machine × Year (Hours)")
-            st.dataframe(df.pivot_table(index='M/C Name', columns='Year',
-                                        values='Total Hrs', aggfunc='sum', fill_value=0),
-                         use_container_width=True)
-
-    # ---------- TAB 4: YEARLY ANALYSIS ----------
-    with tab4:
-        years_available = sorted(df['Year'].unique())
-        if len(years_available) == 0:
-            st.info("Upload at least one file with a year in the filename.")
-        else:
-            selected_year = st.selectbox("Select Year", years_available,
-                                         index=len(years_available) - 1)
-            year_df = df[df['Year'] == selected_year]
-
-            st.subheader(f"🏆 Total Year Summary — {selected_year}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Breakdown Hours", f"{year_df['Total Hrs'].sum():,.1f}")
-            c2.metric("Total Production Loss", f"{year_df['Production Loss'].sum():,.0f}")
-            c3.metric("Total Events", len(year_df))
-            c4.metric("Avg Hours/Event",
-                      f"{year_df['Total Hrs'].mean():.2f}" if len(year_df) else "0")
-
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Machines Covered", year_df['M/C Name'].nunique())
-            c6.metric("Distinct Causes", year_df['Reason of Breakdown'].nunique())
-            c7.metric("Worst Machine",
-                      year_df.groupby('M/C Name')['Total Hrs'].sum().idxmax()
-                      if len(year_df) else "-")
-            c8.metric("Top Type",
-                      year_df.groupby('Breakdown Type')['Total Hrs'].sum().idxmax()
-                      if len(year_df) else "-")
-
-            st.divider()
-            st.subheader(f"📅 Month-by-Month ({selected_year})")
-            month_table = year_df.groupby(['Month_Num', 'Month_Name']).agg(
-                Breakdown_Hours=('Total Hrs', 'sum'),
-                Production_Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count')
-            ).reset_index().sort_values('Month_Num')
-            month_table['Cumulative_Hours'] = month_table['Breakdown_Hours'].cumsum()
-            month_table['Cumulative_Loss'] = month_table['Production_Loss'].cumsum()
-            st.dataframe(month_table.drop(columns=['Month_Num']),
-                         use_container_width=True, hide_index=True)
-
-            if len(month_table) > 0:
-                fig = go.Figure()
-                fig.add_trace(go.Bar(x=month_table['Month_Name'],
-                                     y=month_table['Breakdown_Hours'],
-                                     name='Monthly Hours', marker_color='#1F4E78'))
-                fig.add_trace(go.Scatter(x=month_table['Month_Name'],
-                                         y=month_table['Cumulative_Hours'],
-                                         name='Cumulative Hours', mode='lines+markers',
-                                         line=dict(color='#E74C3C', width=3),
-                                         yaxis='y2'))
-                fig.update_layout(
-                    title=f"{selected_year} — Monthly & Cumulative Breakdown Hours",
-                    yaxis=dict(title='Monthly Hours'),
-                    yaxis2=dict(title='Cumulative Hours', overlaying='y', side='right'),
-                    hovermode='x unified', height=450
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader(f"📊 Month × Type ({selected_year})")
-            month_type = year_df.pivot_table(index='Month_Name', columns='Breakdown Type',
-                                             values='Total Hrs', aggfunc='sum', fill_value=0)
-            month_order = [m for m in MONTH_NAMES.values() if m in month_type.index]
-            month_type = month_type.reindex(month_order)
-            st.dataframe(month_type, use_container_width=True)
-
-            st.subheader(f"🏭 Month × Machine ({selected_year})")
-            month_mach = year_df.pivot_table(index='M/C Name', columns='Month_Name',
-                                             values='Total Hrs', aggfunc='sum', fill_value=0)
-            month_mach = month_mach.reindex(columns=month_order, fill_value=0)
-            st.dataframe(month_mach, use_container_width=True)
-
-            st.divider()
-            st.subheader("📈 Year-wise Total (All Years)")
-            year_totals = df.groupby('Year').agg(
-                Breakdown_Hours=('Total Hrs', 'sum'),
-                Production_Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count'),
-                Machines=('M/C Name', 'nunique'),
-                Causes=('Reason of Breakdown', 'nunique')
-            ).reset_index()
-            st.dataframe(year_totals, use_container_width=True, hide_index=True)
-
-            if len(year_totals) >= 2:
-                year_totals = year_totals.sort_values('Year')
-                year_totals['Hours_Change_%'] = (year_totals['Breakdown_Hours'].pct_change() * 100).round(2)
-                year_totals['Loss_Change_%'] = (year_totals['Production_Loss'].pct_change() * 100).round(2)
-                year_totals['Events_Change_%'] = (year_totals['Events'].pct_change() * 100).round(2)
-                st.subheader("📉 Year-over-Year % Change")
-                st.dataframe(year_totals[['Year', 'Hours_Change_%',
-                                           'Loss_Change_%', 'Events_Change_%']],
-                             use_container_width=True, hide_index=True)
-
-            fig = px.bar(year_totals, x='Year', y=['Breakdown_Hours', 'Production_Loss'],
-                         barmode='group', text_auto='.1f')
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("🔁 Top Causes × Year")
-            cause_year = df.pivot_table(index='Reason of Breakdown', columns='Year',
-                                        values='Total Hrs', aggfunc='count', fill_value=0)
-            cause_year['Total'] = cause_year.sum(axis=1)
-            cause_year = cause_year.sort_values('Total', ascending=False).head(10)
-            st.dataframe(cause_year.drop(columns=['Total']), use_container_width=True)
-
-    # ---------- TAB 5: CAPACITY ANALYSIS ----------
-    with tab5:
-        st.subheader("🏭 Plant Capacity & Availability Analysis")
-
-        if not master_machines:
-            st.warning("⚠️ Upload **machines.xlsx** in the sidebar for full capacity analysis.")
-            st.info("Without the master list, only machines with breakdowns are analyzed.")
-
-        period_options = sorted(df['Period_Key'].unique())
-        sel_period_cap = st.selectbox(
-            "Select Period for Capacity Analysis",
-            period_options,
-            index=len(period_options) - 1,
-            format_func=lambda x: df[df['Period_Key'] == x]['Period'].iloc[0]
-            if len(df[df['Period_Key'] == x]) else x
-        )
-        period_df = df[df['Period_Key'] == sel_period_cap]
-
-        # Available hours
-        if sel_period_cap in calendar_data:
-            available_hours_per_machine = calendar_data[sel_period_cap]
-            st.success(f"✅ Calendar loaded for {sel_period_cap}: **{available_hours_per_machine} hrs/machine**")
-        else:
-            days_in_month = pd.Period(sel_period_cap).days_in_month
-            available_hours_per_machine = 20 * days_in_month
-            st.warning(f"⚠️ No calendar for {sel_period_cap}. Using default **{available_hours_per_machine} hrs/machine** "
-                       f"(20 hrs/day × {days_in_month} days).")
-
-        # Machine list
-        if master_machines:
-            all_machines = master_machines
-        else:
-            all_machines = sorted(period_df['M/C Name'].astype(str).unique())
-
-        machines_with_bd = set(period_df['M/C Name'].astype(str).unique())
-        machines_without_bd = [m for m in all_machines if m not in machines_with_bd]
-
-        total_machines = len(all_machines)
-        with_bd_count = len([m for m in all_machines if m in machines_with_bd])
-        without_bd_count = total_machines - with_bd_count
-
-        plant_capacity = total_machines * available_hours_per_machine
-        breakdown_hours = period_df['Total Hrs'].sum()
-        production_loss = period_df['Production Loss'].sum()
-        availability_pct = ((plant_capacity - breakdown_hours) / plant_capacity * 100) if plant_capacity else 0
-        downtime_pct = (breakdown_hours / plant_capacity * 100) if plant_capacity else 0
-
-        events = len(period_df)
-        mttr = (breakdown_hours / events) if events else 0
-        mtbf = ((plant_capacity - breakdown_hours) / events) if events else 0
-
-        # KPI CARDS
-        st.markdown("### 📊 Plant-wide KPIs")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Machines", total_machines)
-        c2.metric("With Breakdown",
-                  f"{with_bd_count} ({with_bd_count/total_machines*100:.1f}%)" if total_machines else "0")
-        c3.metric("Without Breakdown",
-                  f"{without_bd_count} ({without_bd_count/total_machines*100:.1f}%)" if total_machines else "0")
-        c4.metric("Available Hrs/Machine", f"{available_hours_per_machine:,.0f}")
-
-        st.markdown("### ⏱️ Availability & Loss")
-        c5, c6, c7, c8 = st.columns(4)
-        c5.metric("Plant Capacity (hrs)", f"{plant_capacity:,.0f}")
-        c6.metric("Breakdown Hours", f"{breakdown_hours:,.1f}")
-        c7.metric("Availability %", f"{availability_pct:.2f}%")
-        c8.metric("Downtime %", f"{downtime_pct:.2f}%")
-
-        c9, c10, c11, c12 = st.columns(4)
-        c9.metric("MTBF (hrs)", f"{mtbf:,.1f}" if events else "—")
-        c10.metric("MTTR (hrs)", f"{mttr:.2f}" if events else "—")
-        c11.metric("Production Loss", f"{production_loss:,.0f}")
-        c12.metric("Loss per Breakdown Hr",
-                   f"{production_loss/breakdown_hours:.1f}" if breakdown_hours else "—")
-
-        st.divider()
-
-        # Two pies
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Machines — Breakdown Status")
-            pie_df = pd.DataFrame({
-                "Status": ["With Breakdown", "Without Breakdown"],
-                "Count": [with_bd_count, without_bd_count]
-            })
-            fig = px.pie(pie_df, names="Status", values="Count", hole=0.4,
-                         color="Status",
-                         color_discrete_map={"With Breakdown": "#E74C3C",
-                                             "Without Breakdown": "#27AE60"})
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            st.subheader("Downtime Contribution")
-            pie2 = period_df.groupby('Breakdown Type')['Total Hrs'].sum().reset_index()
-            if len(pie2) > 0:
-                fig = px.pie(pie2, names='Breakdown Type', values='Total Hrs', hole=0.4)
-                st.plotly_chart(fig, use_container_width=True)
-
-        # ---- Build per-machine stats ----
-        machine_stats = []
-        for m in all_machines:
-            m_df = period_df[period_df['M/C Name'].astype(str) == m]
-            m_hours = m_df['Total Hrs'].sum()
-            m_events = len(m_df)
-            m_loss = m_df['Production Loss'].sum()
-            m_avail = ((available_hours_per_machine - m_hours) / available_hours_per_machine * 100) if available_hours_per_machine else 100
-            m_mtbf = ((available_hours_per_machine - m_hours) / m_events) if m_events else None
-            m_mttr = (m_hours / m_events) if m_events else 0
-
-            machine_stats.append({
-                "Machine": m,
-                "Breakdown Hours": round(m_hours, 2),
-                "Events": m_events,
-                "Production Loss": round(m_loss, 1),
-                "Availability %": round(m_avail, 2),
-                "MTBF (hrs)": round(m_mtbf, 1) if m_mtbf else "—",
-                "MTTR (hrs)": round(m_mttr, 2) if m_events else "—",
-            })
-
-        machine_stats_df = pd.DataFrame(machine_stats).sort_values('Availability %')
-
-        st.subheader("📋 Per-Machine Availability (Overall)")
-        st.dataframe(machine_stats_df, use_container_width=True, hide_index=True)
-
-        # ---- SPLIT by type ----
-        st.divider()
-        st.subheader("🔬 MTBF & MTTR — Split by Breakdown Type (Machine-wise)")
-
-        type_stats = []
-        for m in all_machines:
-            m_df = period_df[period_df['M/C Name'].astype(str) == m]
-            for btype in ['Instrumentation', 'Electrical', 'Mechanical']:
-                t_df = m_df[m_df['Breakdown Type'] == btype]
-                t_hours = t_df['Total Hrs'].sum()
-                t_events = len(t_df)
-                t_loss = t_df['Production Loss'].sum()
-                t_mttr = (t_hours / t_events) if t_events else None
-                t_mtbf = ((available_hours_per_machine - t_hours) / t_events) if t_events else None
-
-                type_stats.append({
-                    "Machine": m,
-                    "Breakdown Type": btype,
-                    "Events": t_events,
-                    "Breakdown Hours": round(t_hours, 2),
-                    "Production Loss": round(t_loss, 1),
-                    "MTTR (hrs)": round(t_mttr, 2) if t_mttr else "—",
-                    "MTBF (hrs)": round(t_mtbf, 1) if t_mtbf else "—",
-                })
-
-        type_stats_df = pd.DataFrame(type_stats)
-        type_stats_display = type_stats_df[type_stats_df['Events'] > 0].copy()
-        type_stats_display = type_stats_display.sort_values(
-            ['Machine', 'Breakdown Type']).reset_index(drop=True)
-
-        st.dataframe(type_stats_display, use_container_width=True, hide_index=True)
-
-        # MTTR & MTBF charts split by type
-        if len(type_stats_display) > 0:
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("**🔧 MTTR (hrs) by Machine & Type**")
-                fig = px.bar(
-                    type_stats_display,
-                    x='Machine', y='MTTR (hrs)',
-                    color='Breakdown Type',
-                    barmode='group',
-                    text='MTTR (hrs)',
-                    color_discrete_map={
-                        'Instrumentation': '#3498DB',
-                        'Electrical': '#F39C12',
-                        'Mechanical': '#E74C3C'
-                    }
-                )
-                fig.update_layout(height=500, xaxis_tickangle=-45)
-                st.plotly_chart(fig, use_container_width=True)
-
-            with col2:
-                st.markdown("**⏱️ MTBF (hrs) by Machine & Type**")
-                fig = px.bar(
-                    type_stats_display,
-                    x='Machine', y='MTBF (hrs)',
-                    color='Breakdown Type',
-                    barmode='group',
-                    text='MTBF (hrs)',
-                    color_discrete_map={
-                        'Instrumentation': '#3498DB',
-                        'Electrical': '#F39C12',
-                        'Mechanical': '#E74C3C'
-                    }
-                )
-                fig.update_layout(height=500, xaxis_tickangle=-45)
-                st.plotly_chart(fig, use_container_width=True)
-
-        # Pivots
-        col3, col4 = st.columns(2)
-        with col3:
-            st.markdown("**📊 MTTR (hrs) — Pivot: Machine × Type**")
-            mttr_pivot = type_stats_df.pivot_table(
-                index='Machine', columns='Breakdown Type',
-                values='MTTR (hrs)', aggfunc='first', fill_value=0
-            )
-            mttr_pivot = mttr_pivot.apply(pd.to_numeric, errors='coerce').fillna(0).round(2)
-            st.dataframe(mttr_pivot, use_container_width=True)
-
-        with col4:
-            st.markdown("**📊 MTBF (hrs) — Pivot: Machine × Type**")
-            mtbf_pivot = type_stats_df.pivot_table(
-                index='Machine', columns='Breakdown Type',
-                values='MTBF (hrs)', aggfunc='first', fill_value=0
-            )
-            mtbf_pivot = mtbf_pivot.apply(pd.to_numeric, errors='coerce').fillna(0).round(1)
-            st.dataframe(mtbf_pivot, use_container_width=True)
-
-        # Dominant type per machine
-        st.subheader("🎯 Dominant Breakdown Type per Machine")
-        if len(period_df) > 0:
-            dominant = period_df.groupby(['M/C Name', 'Breakdown Type'])['Total Hrs'].sum().reset_index()
-            idx = dominant.groupby('M/C Name')['Total Hrs'].idxmax()
-            dominant_top = dominant.loc[idx].rename(columns={
-                'M/C Name': 'Machine',
-                'Breakdown Type': 'Dominant Type',
-                'Total Hrs': 'Hours'
-            }).reset_index(drop=True)
-            st.dataframe(dominant_top, use_container_width=True, hide_index=True)
-
-        # ============================================================
-        # MACHINE-WISE MTBF & MTTR CHARTS
-        # ============================================================
-        st.divider()
-        st.subheader("📊 Machine-wise MTBF & MTTR Analysis")
-
-        chart_df = machine_stats_df[machine_stats_df['Events'] > 0].copy()
-
-        if len(chart_df) > 0:
-
-            # ---- MTTR chart (High = Problematic) ----
-            st.markdown("### 🔧 MTTR per Machine — **High = Problematic**")
-            st.caption("Higher MTTR means longer time to fix — prioritize machines with long repairs.")
-
-            mttr_chart = chart_df[chart_df['MTTR (hrs)'] != "—"].copy()
-            if len(mttr_chart) > 0:
-                mttr_chart['MTTR (hrs)'] = pd.to_numeric(mttr_chart['MTTR (hrs)'],
-                                                          errors='coerce').fillna(0)
-                mttr_sorted = mttr_chart.sort_values('MTTR (hrs)', ascending=False)
-
-                fig = px.bar(
-                    mttr_sorted,
-                    x='Machine',
-                    y='MTTR (hrs)',
-                    color='MTTR (hrs)',
-                    color_continuous_scale=['#27AE60', '#F39C12', '#E74C3C'],
-                    text_auto='.2f'
-                )
-                fig.update_layout(
-                    height=500,
-                    xaxis_tickangle=-45,
-                    yaxis_title="MTTR (hrs)"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-            # ---- MTBF chart (Low = Problematic) ----
-            st.markdown("### ⏱️ MTBF per Machine — **Low = Problematic**")
-            st.caption("Lower MTBF means more frequent failures — reliability issue.")
-
-            mtbf_chart = chart_df[chart_df['MTBF (hrs)'] != "—"].copy()
-            if len(mtbf_chart) > 0:
-                mtbf_chart['MTBF (hrs)'] = pd.to_numeric(mtbf_chart['MTBF (hrs)'],
-                                                          errors='coerce').fillna(0)
-                mtbf_sorted = mtbf_chart.sort_values('MTBF (hrs)', ascending=True)
-
-                fig = px.bar(
-                    mtbf_sorted,
-                    x='Machine',
-                    y='MTBF (hrs)',
-                    color='MTBF (hrs)',
-                    color_continuous_scale=['#E74C3C', '#F39C12', '#27AE60'],
-                    text_auto='.0f'
-                )
-                fig.update_layout(
-                    height=500,
-                    xaxis_tickangle=-45,
-                    yaxis_title="MTBF (hrs)"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-            # ---- Combined chart ----
-            st.markdown("### 📊 Combined — MTBF & MTTR Side by Side")
-            st.caption("Ideal machine: **High MTBF + Low MTTR**.")
-
-            combined = chart_df.copy()
-            combined['MTTR (hrs)'] = pd.to_numeric(combined['MTTR (hrs)'],
-                                                     errors='coerce').fillna(0)
-            combined['MTBF (hrs)'] = pd.to_numeric(combined['MTBF (hrs)'],
-                                                     errors='coerce').fillna(0)
-            combined = combined.sort_values('MTBF (hrs)', ascending=True)
-
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=combined['Machine'],
-                y=combined['MTBF (hrs)'],
-                name='MTBF (hrs)',
-                marker_color='#27AE60',
-                text=combined['MTBF (hrs)'].round(0),
-                textposition='outside',
-                yaxis='y'
-            ))
-            fig.add_trace(go.Bar(
-                x=combined['Machine'],
-                y=combined['MTTR (hrs)'],
-                name='MTTR (hrs)',
-                marker_color='#E74C3C',
-                text=combined['MTTR (hrs)'].round(2),
-                textposition='outside',
-                yaxis='y2'
-            ))
-            fig.update_layout(
-                barmode='group',
-                height=500,
-                xaxis_tickangle=-45,
-                yaxis=dict(title='MTBF (hrs)'),
-                yaxis2=dict(title='MTTR (hrs)', overlaying='y', side='right'),
-                legend=dict(orientation='h', yanchor='bottom', y=1.02,
-                            xanchor='right', x=1),
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # ---- Top 10 worst by MTTR ----
-            st.markdown("### ⚠️ Top 10 Worst Machines by MTTR")
-            worst_mttr = chart_df.copy()
-            worst_mttr['MTTR (hrs)'] = pd.to_numeric(worst_mttr['MTTR (hrs)'],
-                                                       errors='coerce').fillna(0)
-            worst_10 = worst_mttr.sort_values('MTTR (hrs)', ascending=False).head(10)
-            st.dataframe(
-                worst_10[['Machine', 'Events', 'Breakdown Hours',
-                          'MTTR (hrs)', 'MTBF (hrs)', 'Availability %']],
-                use_container_width=True, hide_index=True
-            )
-
-            # ---- Top 10 worst by MTBF (lowest) ----
-            st.markdown("### ⚠️ Top 10 Worst Machines by MTBF (Lowest)")
-            worst_mtbf = chart_df[chart_df['MTBF (hrs)'] != "—"].copy()
-            if len(worst_mtbf) > 0:
-                worst_mtbf['MTBF (hrs)'] = pd.to_numeric(worst_mtbf['MTBF (hrs)'],
-                                                          errors='coerce').fillna(0)
-                worst_10_mtbf = worst_mtbf.sort_values('MTBF (hrs)', ascending=True).head(10)
-                st.dataframe(
-                    worst_10_mtbf[['Machine', 'Events', 'Breakdown Hours',
-                                   'MTBF (hrs)', 'MTTR (hrs)', 'Availability %']],
-                    use_container_width=True, hide_index=True
-                )
-
-    # ---------- TAB 6: MACHINE-WISE ----------
-    with tab6:
-        st.subheader("Machine-wise Breakdown Hours")
-        mach = df.groupby('M/C Name').agg(
-            Hours=('Total Hrs', 'sum'),
-            Loss=('Production Loss', 'sum'),
-            Events=('Total Hrs', 'count')
-        ).reset_index().sort_values('Hours', ascending=False)
-        st.dataframe(mach, use_container_width=True, hide_index=True)
-
-        if len(mach) > 0:
-            fig = px.bar(mach, x='M/C Name', y=['Hours', 'Loss'],
-                         barmode='group', text_auto='.1f')
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Stacked — Type per Machine")
-        stack = df.groupby(['M/C Name', 'Breakdown Type'])['Total Hrs'].sum().reset_index()
-        if len(stack) > 0:
-            fig = px.bar(stack, x='M/C Name', y='Total Hrs',
-                         color='Breakdown Type', barmode='stack')
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Shift-wise Breakdown Hours")
-        shift_df = df.groupby(['Shift', 'Breakdown Type'])['Total Hrs'].sum().reset_index()
-        if len(shift_df) > 0:
-            fig = px.bar(shift_df, x='Shift', y='Total Hrs', color='Breakdown Type',
-                         barmode='stack', text_auto='.1f')
-            st.plotly_chart(fig, use_container_width=True)
-
-    # ---------- TAB 7: CAUSES ----------
-    with tab7:
-        st.subheader("🔁 Top Repeated Causes")
-        causes = df.groupby('Reason of Breakdown').agg(
-            Frequency=('Reason of Breakdown', 'count'),
-            Hours=('Total Hrs', 'sum'),
-            Loss=('Production Loss', 'sum')
-        ).reset_index().sort_values('Frequency', ascending=False)
-        st.dataframe(causes, use_container_width=True, hide_index=True)
-
-        if len(causes) > 0:
-            fig = px.bar(causes.head(10), x='Frequency', y='Reason of Breakdown',
-                         orientation='h', color='Hours', text_auto=True)
-            fig.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("🔥 Cause × Machine Matrix (Top 15 Causes)")
-        if len(causes) > 0:
-            top_causes = causes.head(15)['Reason of Breakdown'].tolist()
-            pivot = df[df['Reason of Breakdown'].isin(top_causes)].pivot_table(
-                index='M/C Name', columns='Reason of Breakdown',
-                values='Total Hrs', aggfunc='count', fill_value=0)
-            st.dataframe(pivot, use_container_width=True)
-
-        if len(sel_periods) >= 2 and len(causes) > 0:
-            st.subheader("📅 Cause Comparison across Months")
-            cause_cmp = df.groupby(['Period', 'Reason of Breakdown'])['Total Hrs'].sum().reset_index()
-            top_causes = causes.head(8)['Reason of Breakdown'].tolist()
-            cause_cmp_top = cause_cmp[cause_cmp['Reason of Breakdown'].isin(top_causes)]
-            if len(cause_cmp_top) > 0:
-                fig = px.bar(cause_cmp_top, x='Reason of Breakdown', y='Total Hrs',
-                             color='Period', barmode='group', text_auto='.1f')
-                fig.update_layout(xaxis_tickangle=-30, height=550)
-                st.plotly_chart(fig, use_container_width=True)
-
-    # ---------- TAB 8: YTD (FISCAL YEAR) ----------
-    with tab8:
-        st.subheader("📆 YTD Analysis (Fiscal Year: April to March)")
-        
-        fy_options = sorted(df['FY_Label'].dropna().unique())
-        if len(fy_options) == 0:
-            st.warning("No Fiscal Year data available. Make sure your Excel has a 'Date' column.")
-        else:
-            sel_fy = st.selectbox("Select Financial Year", fy_options, index=len(fy_options)-1)
-            
-            ytd_df = df[df['FY_Label'] == sel_fy].copy()
-            
-            fy_months = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar']
-            ytd_df['Month_Name'] = pd.Categorical(ytd_df['Month_Name'], categories=fy_months, ordered=True)
-            
-            fy_trend = ytd_df.groupby('Month_Name', observed=False).agg(
-                Hours=('Total Hrs', 'sum'),
-                Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count')
-            ).reset_index()
-            
-            fy_trend = fy_trend[fy_trend['Events'] > 0]
-            
-            fy_trend['Cumulative_Hours'] = fy_trend['Hours'].cumsum()
-            fy_trend['Cumulative_Loss'] = fy_trend['Loss'].cumsum()
-            
-            st.markdown(f"### YTD Totals — FY {sel_fy}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("YTD Breakdown Hours", f"{ytd_df['Total Hrs'].sum():,.1f}")
-            c2.metric("YTD Production Loss", f"{ytd_df['Production Loss'].sum():,.0f} Kg")
-            c3.metric("YTD Cost of Loss", f"₹{ytd_df['Production Loss'].sum() * cost_per_unit:,.0f}")
-            c4.metric("YTD Breakdown Events", len(ytd_df))
-            
-            st.divider()
-            
-            st.subheader("📊 Monthly & Cumulative Trend (YTD)")
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=fy_trend['Month_Name'], y=fy_trend['Hours'],
-                name='Monthly Hours', marker_color='#1F4E78',
-                text=fy_trend['Hours'].round(1), textposition='outside'
-            ))
-            fig.add_trace(go.Scatter(
-                x=fy_trend['Month_Name'], y=fy_trend['Cumulative_Hours'],
-                name='Cumulative Hours', mode='lines+markers',
-                line=dict(color='#E74C3C', width=3), yaxis='y2'
-            ))
-            fig.update_layout(
-                yaxis=dict(title='Monthly Hours'),
-                yaxis2=dict(title='Cumulative Hours', overlaying='y', side='right'),
-                hovermode='x unified', height=450
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.subheader("📋 Month-wise YTD Breakdown")
-            st.dataframe(fy_trend[['Month_Name', 'Hours', 'Loss', 'Events', 'Cumulative_Hours', 'Cumulative_Loss']], use_container_width=True, hide_index=True)
-
-
-    # ============================================================
-    # EXCEL EXPORT
-    # ============================================================
-    st.divider()
-    st.subheader("⬇️ Export Full Analysis to Excel")
-
-    def build_excel_report(df):
-        header_fill = PatternFill("solid", fgColor="1F4E78")
-        header_font = Font(bold=True, color="FFFFFF")
-        buffer = io.BytesIO()
-
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-
-            kpi = pd.DataFrame({
-                "Metric": ["Total Hours", "Total Loss", "Events", "Avg Hours/Event",
-                           "Periods", "Machines", "Files"],
-                "Value": [
-                    round(df['Total Hrs'].sum(), 2),
-                    round(df['Production Loss'].sum(), 2),
-                    len(df),
-                    round(df['Total Hrs'].mean(), 2) if len(df) else 0,
-                    ", ".join(sorted(df['Period'].unique())),
-                    df['M/C Name'].nunique(),
-                    ", ".join(sorted(df['Source File'].unique()))
-                ]
-            })
-            kpi.to_excel(writer, sheet_name="KPI Summary", index=False)
-
-            monthly_cmp = df.groupby('Period_Key').agg(
-                Period=('Period', 'first'),
-                Breakdown_Hours=('Total Hrs', 'sum'),
-                Production_Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count')
-            ).reset_index().sort_values('Period_Key')
-            monthly_cmp['Hours_Change_%'] = (monthly_cmp['Breakdown_Hours'].pct_change() * 100).round(2)
-            monthly_cmp['Loss_Change_%'] = (monthly_cmp['Production_Loss'].pct_change() * 100).round(2)
-            monthly_cmp['Cumulative_Hours'] = monthly_cmp['Breakdown_Hours'].cumsum()
-            monthly_cmp.drop(columns=['Period_Key']).to_excel(
-                writer, sheet_name="Monthly Comparison", index=False)
-
-            yearly_cmp = df.groupby('Year').agg(
-                Breakdown_Hours=('Total Hrs', 'sum'),
-                Production_Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count'),
-                Machines=('M/C Name', 'nunique'),
-                Causes=('Reason of Breakdown', 'nunique')
-            ).reset_index().sort_values('Year')
-            yearly_cmp['Hours_Change_%'] = (yearly_cmp['Breakdown_Hours'].pct_change() * 100).round(2)
-            yearly_cmp['Loss_Change_%'] = (yearly_cmp['Production_Loss'].pct_change() * 100).round(2)
-            yearly_cmp.to_excel(writer, sheet_name="Yearly Comparison", index=False)
-
-            df.groupby('Period').agg(
-                Hours=('Total Hrs', 'sum'),
-                Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count')
-            ).reset_index().to_excel(writer, sheet_name="By Period", index=False)
-
-            df.groupby('M/C Name').agg(
-                Hours=('Total Hrs', 'sum'),
-                Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count')
-            ).reset_index().sort_values('Hours', ascending=False).to_excel(
-                writer, sheet_name="By Machine", index=False)
-
-            df.groupby('Breakdown Type').agg(
-                Hours=('Total Hrs', 'sum'),
-                Loss=('Production Loss', 'sum'),
-                Events=('Total Hrs', 'count')
-            ).reset_index().to_excel(writer, sheet_name="By Type", index=False)
-
-            df.groupby('Reason of Breakdown').agg(
-                Frequency=('Reason of Breakdown', 'count'),
-                Hours=('Total Hrs', 'sum'),
-                Loss=('Production Loss', 'sum')
-            ).reset_index().sort_values('Frequency', ascending=False).to_excel(
-                writer, sheet_name="By Cause", index=False)
-
-            df.pivot_table(index='M/C Name', columns='Period',
-                           values='Total Hrs', aggfunc='sum', fill_value=0).to_excel(
-                writer, sheet_name="Machine x Period")
-
-            df.pivot_table(index='Breakdown Type', columns='Year',
-                           values='Total Hrs', aggfunc='sum', fill_value=0).to_excel(
-                writer, sheet_name="Type x Year")
-
-            df.pivot_table(index='M/C Name', columns='Reason of Breakdown',
-                           values='Total Hrs', aggfunc='count', fill_value=0).to_excel(
-                writer, sheet_name="Cause x Machine")
-
-            df.to_excel(writer, sheet_name="Raw Data", index=False)
-
-            for sheet in writer.sheets.values():
-                for column_cells in sheet.columns:
-                    max_len = max((len(str(c.value)) if c.value else 0) for c in column_cells)
-                    sheet.column_dimensions[column_cells[0].column_letter].width = min(max_len + 3, 50)
-                for cell in sheet[1]:
-                    cell.fill = header_fill
-                    cell.font = header_font
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-
-        buffer.seek(0)
-        return buffer
-
-    excel_data = build_excel_report(df)
-    XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            show_chart(px.pie(dt, names="Type", values="Hours", title="Downtime by Type",
+                              color_discrete_sequence=px.colors.qualitative.Set2))
+
+    st.markdown("**Machine-wise Statistics**")
+    show_df(machine_stats_df, hide_index=True)
+
+    # ---- split by type ----
+    trows = []
+    for mc in universe:
+        for tp in sorted(df_all["Type"].unique()):
+            dm = dfp[(dfp["Machine"] == mc) & (dfp["Type"] == tp)]
+            ev = len(dm)
+            if ev == 0:
+                continue
+            hrs = dm["Hours"].sum()
+            trows.append({"Machine": mc, "Type": tp, "Events": ev, "Hours": round(hrs, 2),
+                          "MTTR (hrs)": round(hrs / ev, 2),
+                          "MTBF (hrs)": round(max(avail_hrs - hrs, 0) / ev, 2)})
+    type_stats_df = pd.DataFrame(trows)
+
+    st.markdown("### MTTR & MTBF by Breakdown Type")
+    if type_stats_df.empty:
+        st.info("No breakdowns for the selected period.")
+    else:
+        show_chart(px.bar(type_stats_df, x="Machine", y="MTTR (hrs)", color="Type", barmode="group",
+                          title="MTTR by Machine & Type"))
+        show_chart(px.bar(type_stats_df, x="Machine", y="MTBF (hrs)", color="Type", barmode="group",
+                          title="MTBF by Machine & Type"))
+
+    # ---- machine-wise MTTR / MTBF ----
+    st.markdown("### Machine-wise MTTR & MTBF")
+    ms = machine_stats_df.dropna(subset=["MTTR (hrs)", "MTBF (hrs)"])
+    if ms.empty:
+        st.info("No machines with breakdowns in this period.")
+    else:
+        h = max(400, 22 * len(ms))
+        mttr_s = ms.sort_values("MTTR (hrs)", ascending=False)
+        f = px.bar(mttr_s, x="MTTR (hrs)", y="Machine", orientation="h", color="MTTR (hrs)",
+                   color_continuous_scale="RdYlGn_r", title="MTTR by Machine (highest to lowest)", height=h)
+        f.update_yaxes(autorange="reversed")
+        show_chart(f)
+
+        mtbf_s = ms.sort_values("MTBF (hrs)", ascending=True)
+        f = px.bar(mtbf_s, x="MTBF (hrs)", y="Machine", orientation="h", color="MTBF (hrs)",
+                   color_continuous_scale="RdYlGn", title="MTBF by Machine (lowest to highest)", height=h)
+        f.update_yaxes(autorange="reversed")
+        show_chart(f)
+
+        comb = ms.sort_values("MTTR (hrs)", ascending=False)
+        fig = go.Figure()
+        fig.add_bar(x=comb["Machine"], y=comb["MTTR (hrs)"], name="MTTR (hrs)", marker_color="#E74C3C")
+        fig.add_trace(go.Scatter(x=comb["Machine"], y=comb["MTBF (hrs)"], name="MTBF (hrs)",
+                                 mode="lines+markers", line=dict(color="#1F4E78", width=3), yaxis="y2"))
+        fig.update_layout(title="MTTR vs MTBF by Machine", yaxis=dict(title="MTTR (hrs)"),
+                          yaxis2=dict(title="MTBF (hrs)", overlaying="y", side="right"),
+                          legend=dict(orientation="h", y=1.12))
+        show_chart(fig)
+
+        t1, t2 = st.columns(2)
+        with t1:
+            st.markdown("**Top 10 Worst Machines by MTTR**")
+            show_df(ms.nlargest(10, "MTTR (hrs)")[["Machine", "Events", "Hours", "MTTR (hrs)"]], hide_index=True)
+        with t2:
+            st.markdown("**Top 10 Worst Machines by MTBF**")
+            show_df(ms.nsmallest(10, "MTBF (hrs)")[["Machine", "Events", "Hours", "MTBF (hrs)"]], hide_index=True)
+
+# ---------------------------------------------------------------- Tab 6
+with tabs[5]:
+    st.subheader("Machine-wise Analysis")
+    mw = (df.groupby("Machine").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"), Events=("Hours", "count"))
+          .reset_index().sort_values("Hours", ascending=False).round(2))
+    show_df(mw, hide_index=True)
+
+    f = px.bar(mw.melt(id_vars="Machine", value_vars=["Hours", "Loss"], var_name="Metric", value_name="Value"),
+               x="Machine", y="Value", color="Metric", barmode="group", title="Hours vs Production Loss by Machine",
+               color_discrete_map={"Hours": "#1F4E78", "Loss": "#E74C3C"})
+    show_chart(f)
+
+    g = df.groupby(["Machine", "Type"])["Hours"].sum().reset_index()
+    show_chart(px.bar(g, x="Machine", y="Hours", color="Type", barmode="stack",
+                      category_orders={"Machine": mw["Machine"].tolist()}, title="Breakdown Hours by Type per Machine"))
+
+    g = df.groupby(["Machine", "Shift"])["Hours"].sum().reset_index()
+    show_chart(px.bar(g, x="Machine", y="Hours", color="Shift", barmode="stack",
+                      category_orders={"Machine": mw["Machine"].tolist()}, title="Shift-wise Breakdown Hours per Machine"))
+
+# ---------------------------------------------------------------- Tab 7
+with tabs[6]:
+    st.subheader("Cause Analysis")
+    cz = (df.groupby("Cause").agg(Hours=("Hours", "sum"), Loss=("Loss", "sum"), Events=("Hours", "count"))
+          .reset_index().sort_values("Hours", ascending=False).round(2))
+    st.markdown("**Top Causes**")
+    show_df(cz, hide_index=True)
+
+    top10 = cz.head(10)
+    f = px.bar(top10, x="Hours", y="Cause", orientation="h", color="Hours",
+               color_continuous_scale="Reds", title="Top 10 Causes by Hours")
+    f.update_yaxes(autorange="reversed")
+    show_chart(f)
+
+    top15 = cz.head(15)["Cause"].tolist()
+    st.markdown("**Cause × Machine Matrix (Top 15 causes, Hours)**")
+    show_df(pivot(df[df["Cause"].isin(top15)], "Cause", "Machine"))
+
+    top10c = cz.head(10)["Cause"].tolist()
+    g = df[df["Cause"].isin(top10c)].groupby(["Period_Label", "Cause"])["Hours"].sum().reset_index()
+    show_chart(px.bar(g, x="Cause", y="Hours", color="Period_Label", barmode="group",
+                      category_orders={"Period_Label": period_order, "Cause": top10c},
+                      title="Top 10 Causes - Comparison Across Months"))
+
+# ---------------------------------------------------------------- Tab 8
+with tabs[7]:
+    st.subheader("YTD (Fiscal Year: April - March)")
+    fys = sorted(df["FY_Label"].unique())
+    fy = st.selectbox("Select Fiscal Year", fys, index=len(fys) - 1, key="fy_sel")
+    dfy = df[df["FY_Label"] == fy]
+    ytd_hours, ytd_loss = dfy["Hours"].sum(), dfy["Loss"].sum()
+    y1, y2, y3, y4 = st.columns(4)
+    y1.metric("YTD Hours", f"{ytd_hours:,.1f}")
+    y2.metric("YTD Loss", f"{ytd_loss:,.1f}")
+    y3.metric("YTD Cost (₹)", f"{ytd_loss * cost_per_unit:,.0f}")
+    y4.metric("YTD Events", f"{len(dfy):,}")
+
+    fy_order = [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3]
+    mon = dfy.groupby("Month")["Hours"].sum().reindex(fy_order).dropna().reset_index()
+    mon["Month Name"] = mon["Month"].apply(lambda m: calendar.month_abbr[m])
+    mon["Cumulative Hours"] = mon["Hours"].cumsum()
+    fig = go.Figure()
+    fig.add_bar(x=mon["Month Name"], y=mon["Hours"], name="Monthly Hours", marker_color="#1F4E78")
+    fig.add_trace(go.Scatter(x=mon["Month Name"], y=mon["Cumulative Hours"], name="Cumulative Hours",
+                             mode="lines+markers", line=dict(color="#E74C3C", width=3), yaxis="y2"))
+    fig.update_layout(title=f"FY {fy} - Monthly & Cumulative Hours",
+                      xaxis=dict(categoryorder="array", categoryarray=[calendar.month_abbr[m] for m in fy_order]),
+                      yaxis=dict(title="Hours"),
+                      yaxis2=dict(title="Cumulative Hours", overlaying="y", side="right"),
+                      legend=dict(orientation="h", y=1.12))
+    show_chart(fig)
+
+# =====================================================================
+# 5. EXPORTS
+# =====================================================================
+st.markdown("---")
+st.subheader("📥 Export Report")
+try:
     st.download_button(
-        "📥 Download Full Multi-Month Analysis (.xlsx)",
-        data=excel_data,
+        label="Download Excel Report",
+        data=build_excel_report(df),
         file_name="Breakdown_Analysis_Report.xlsx",
-        mime=XLSX_MIME
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+except Exception as e:  # noqa: BLE001
+    st.error(f"Could not build Excel report: {e}")
 
+st.markdown("**PowerPoint report** (editable charts & tables - opens in Microsoft PowerPoint and WPS Presentation)")
+if not PPTX_OK:
+    st.info("To enable PowerPoint export run: `pip install python-pptx` and restart the app.")
 else:
-    st.info("👆 Upload at least one **Breakdown Excel** file to begin.")
-    st.markdown("""
-    ### 📁 Files you can upload
-
-    | File | Required? | Format |
-    |---|---|---|
-    | **Breakdown Excel(s)** | ✅ Yes | Monthly breakdown files (e.g., `Break_Jun-25.xlsx`) |
-    | **Master Machine List** | Optional | `machines.xlsx` — column `Machine Name` with all machines |
-    | **Production Calendar(s)** | Optional | `calendar_Jun-25.xlsx` — columns `Date`, `Available_Hours` |
-
-    ### 🎯 What you get
-
-    - 📊 **Overview** — KPIs, pie charts, monthly trend
-    - 📅 **Month Comparison** — MoM % change
-    - 📈 **Year Comparison** — YoY trends
-    - 🏆 **Yearly Analysis** — full-year totals + month-by-month
-    - 🏭 **Capacity Analysis** — availability %, MTBF, MTTR (overall + split by type), machine-wise charts
-    - 🔧 **Machine-wise** — per-machine rankings
-    - 🔁 **Causes** — repeated causes, cross-month comparison
-    - 📆 **YTD (Fiscal Year)** — April to March cumulative analysis
-    """)
-
-
+    st.caption("Covers all 8 tabs for the current filters. Capacity slides use the period selected in the "
+               "Capacity tab; regenerate after changing filters.")
+    if st.button("Generate PowerPoint Report"):
+        with st.spinner("Building presentation..."):
+            try:
+                st.session_state["ppt_bytes"] = build_ppt_report(
+                    df, cost_per_unit, cal_hours, master_list, period_order, label_to_code, cap_label)
+            except Exception as e:  # noqa: BLE001
+                st.session_state.pop("ppt_bytes", None)
+                st.error(f"Could not build PowerPoint: {e}")
+    if "ppt_bytes" in st.session_state:
+        st.download_button(
+            label="Download PowerPoint (.pptx)",
+            data=st.session_state["ppt_bytes"],
+            file_name="Breakdown_Analysis_Report.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
