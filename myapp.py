@@ -26,6 +26,52 @@ except ImportError:
 # =====================================================================
 st.set_page_config(page_title="Breakdown & Production Loss Analysis Dashboard", layout="wide")
 
+#===========================================================================================
+# LOGIN PROTECTION
+#===========================================================================================
+VALID_USERS ={
+    "vikas": "Raymond@2026" ,
+    "manager": "Admin@123" ,
+    "dyeing": "Dyeing@123"
+}
+
+def check_password():
+    """Returns True if user has entered correct credentials."""
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+        
+    if st.session_state["authenticated"]:
+        return True
+    
+    # Login Screen UI
+    st.markdown("""
+    <div style="max-width: 400px; margin: 80px auto; padding: 30px;
+                background-color: #1F4E78; border-radius: 12px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0,3); text-align: center;">
+        <h2 style="color:white; margin-bottom: 5px;"> Breakdown Analysis</h2>
+        <p style="color:#CCDDEE; font-size:14px;">Restricted Access</p>
+    </div>
+    """, unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("password", type="password", key="login_pass")
+        
+        if st.button("Login", use_container_width=True, type="primary"):
+            if username in VALID_USERS and VALID_USERS[username] == password:
+                st.session_state["authenticated"] = True
+                st.session_state["current_user"] = username
+                st.rerun()
+            else:
+                st.error(" Invalid username or password")
+    return False
+if not check_password():
+    st.stop()
+#=============================================================
+#MAIN APP STARTS HERE (Only visible if logged in)
+#=============================================================
+
 st.markdown(
     """
     <div style="background-color:#1F3A5F;padding:16px 20px;border-radius:8px;color:white;margin-bottom:12px;">
